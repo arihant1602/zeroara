@@ -183,6 +183,54 @@ export async function generateSamplePdfBytes(): Promise<Uint8Array> {
     { x: 55, y: 305, size: 8, font, color: rgb(0.4, 0.45, 0.5) }
   );
 
+  // Add additional dummy pages for multi-page processing test
+  for (let i = 2; i <= 5; i++) {
+    const extraPage = pdfDoc.addPage([600, 750]);
+    extraPage.drawText(`APPENDIX: PAGE ${i}`, {
+      x: 55,
+      y: 700,
+      size: 11,
+      font: fontBold,
+      color: rgb(0.12, 0.15, 0.2),
+    });
+    extraPage.drawText(`This is synthetic filler content for page ${i} of the sample document.`, {
+      x: 55,
+      y: 670,
+      size: 9,
+      font,
+      color: rgb(0.35, 0.4, 0.48),
+    });
+    extraPage.drawText(`CONFIDENTIAL DATA BLOCK ${i}A:`, {
+      x: 55,
+      y: 640,
+      size: 9,
+      font: fontBold,
+      color: rgb(0.12, 0.15, 0.2),
+    });
+    extraPage.drawText(`ROUTING-${i}983-XYZ`, {
+      x: 220,
+      y: 640,
+      size: 9,
+      font: fontMono,
+      color: rgb(0.1, 0.1, 0.1),
+    });
+    
+    extraPage.drawText(`CONFIDENTIAL DATA BLOCK ${i}B:`, {
+      x: 55,
+      y: 610,
+      size: 9,
+      font: fontBold,
+      color: rgb(0.12, 0.15, 0.2),
+    });
+    extraPage.drawText(`$${(i * 15000).toLocaleString()}.00 USD`, {
+      x: 220,
+      y: 610,
+      size: 9,
+      font: fontMono,
+      color: rgb(0.1, 0.1, 0.1),
+    });
+  }
+
   return await pdfDoc.save();
 }
 

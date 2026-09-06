@@ -5,6 +5,7 @@ export interface RedactionResult {
   textStreamCount: number;
   burnedZonesCount: number;
   durationMs: number;
-  flattenedPngDataUrl: string;
+  flattenedPngDataUrl: string; // The first page preview
   fileSizeBytes: number;
+  pageCount: number;
 }

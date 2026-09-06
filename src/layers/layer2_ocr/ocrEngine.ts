@@ -23,7 +23,8 @@ if (typeof window !== 'undefined' && (pdfjs as any)?.GlobalWorkerOptions) {
 const DISPLAY_WIDTH = 900; // canvas + coordinate space presented to the UI
 const OCR_SUPERSAMPLE = 2.0; // spec Stage 2: 2.0x viewport scale for OCR fidelity
 const OCR_MAX_WIDTH = 2200; // hard cap to bound Tesseract Wasm memory
-const TEXT_LAYER_MIN_TOKENS = 5; // below this a PDF is treated as scanned -> OCR
+const TEXT_LAYER_MIN_TOKENS = 3; // fewer text items than this (and little text) => scanned page -> OCR
+const TEXT_LAYER_MIN_CHARS = 24; // a page with this much real text is digital, not a scan
 
 interface RawOcrWord {
   text: string;
@@ -102,16 +103,17 @@ async function runTesseract(
 function mapWordsToTokens(
   words: RawOcrWord[],
   factor: number,
-  prefix: string
+  prefix: string,
+  pageNumber: number = 1
 ): ExtractedSpatialToken[] {
   return words.map((w, idx) => ({
-    id: `${prefix}_${idx}`,
+    id: `${prefix}_${idx}_p${pageNumber}`,
     text: w.text,
     x: Math.round(w.x0 * factor),
     y: Math.round(w.y0 * factor),
     width: Math.round((w.x1 - w.x0) * factor),
     height: Math.round((w.y1 - w.y0) * factor),
-    page: 1,
+    page: pageNumber,
     confidence: w.confidence,
   }));
 }
@@ -161,7 +163,8 @@ export async function checkSuryaHealth(): Promise<SuryaHealth> {
 // sidecar is unreachable so callers can fall back to in-browser Tesseract.
 async function ocrViaSurya(
   image: HTMLCanvasElement,
-  factor: number
+  factor: number,
+  pageNumber: number = 1
 ): Promise<{ tokens: ExtractedSpatialToken[]; rawText: string; meanConfidence: number } | null> {
   try {
     const blob: Blob | null = await new Promise((resolve) =>
@@ -204,13 +207,13 @@ async function ocrViaSurya(
           if (!t) continue;
           const bb = w?.bbox || line?.bbox || [0, 0, 0, 0];
           tokens.push({
-            id: `surya_${idx++}`,
+            id: `surya_${idx++}_p${pageNumber}`,
             text: t,
             x: Math.round(bb[0] * factor),
             y: Math.round(bb[1] * factor),
             width: Math.round((bb[2] - bb[0]) * factor),
             height: Math.round((bb[3] - bb[1]) * factor),
-            page: 1,
+            page: pageNumber,
             confidence: Math.round(norm(w?.confidence ?? lconf) * 10) / 10,
           });
         }
@@ -224,13 +227,13 @@ async function ocrViaSurya(
         for (const p of parts) {
           const wpx = (p.length / Math.max(1, denom)) * lineW;
           tokens.push({
-            id: `surya_${idx++}`,
+            id: `surya_${idx++}_p${pageNumber}`,
             text: p,
             x: Math.round(cx * factor),
             y: Math.round(bb[1] * factor),
             width: Math.round(wpx * factor),
             height: Math.round((bb[3] - bb[1]) * factor),
-            page: 1,
+            page: pageNumber,
             confidence: Math.round(lconf * 10) / 10,
           });
           cx += wpx + (1 / Math.max(1, denom)) * lineW;
@@ -258,6 +261,15 @@ function drawCleanedToDisplay(canvas: HTMLCanvasElement, src: HTMLCanvasElement)
   }
 }
 
+// A hung pdf.js promise (e.g. a wedged worker) must surface as an error, never
+// stall the pipeline silently.
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${label} timed out after ${ms} ms`)), ms);
+    p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
+  });
+}
+
 export class PdfPasswordRequiredError extends Error {
   incorrect: boolean;
   constructor(incorrect: boolean) {
@@ -280,115 +292,170 @@ async function extractPdfDocument(
   });
   let pdf: any;
   try {
-    pdf = await loadingTask.promise;
+    pdf = await withTimeout(loadingTask.promise, 30000, 'pdf.js getDocument');
   } catch (e: any) {
     // e-Aadhaar PDFs are usually password-protected. pdf.js: code 1 = needs
     // password, 2 = incorrect password. Surface a typed error for the UI.
     if (e?.name === 'PasswordException') throw new PdfPasswordRequiredError(e?.code === 2);
     throw e;
   }
-  const page = await pdf.getPage(1);
+  const numPages: number = pdf.numPages;
+  if (import.meta.env.DEV) console.debug(`[ocr:dev] document loaded: ${numPages} page(s)`);
+  try {
 
-  const unscaled = page.getViewport({ scale: 1 });
-  const displayScale = DISPLAY_WIDTH / unscaled.width;
-  const viewport = page.getViewport({ scale: displayScale });
+  const allTokens: ExtractedSpatialToken[] = [];
+  const allTextPieces: string[] = [];
+  const pageRasters = new Map<number, ImageData>();
+  let usedTextLayer = false;
+  let usedSurya = false;
+  let usedTesseract = false;
 
-  canvas.width = Math.round(viewport.width);
-  canvas.height = Math.round(viewport.height);
-  const ctx = canvas.getContext('2d');
-  if (ctx) {
+  // Every page is processed; the single canvas is reused and its pixels are
+  // captured per page so burn/overlays operate on exactly what OCR saw.
+  for (let pageNum = 1; pageNum <= numPages; pageNum++) {
+    const pageLabel = `Page ${pageNum} of ${numPages}`;
+    const base = ((pageNum - 1) / numPages) * 100;
+    const span = 100 / numPages;
+    onProgress?.(Math.round(base), 'Rendering page…', pageLabel);
+
+    const page: any = await withTimeout<any>(pdf.getPage(pageNum), 20000, `pdf.js getPage(${pageNum})`);
+    const unscaled = page.getViewport({ scale: 1 });
+    const displayScale = DISPLAY_WIDTH / unscaled.width;
+    const viewport = page.getViewport({ scale: displayScale });
+
+    canvas.width = Math.round(viewport.width);
+    canvas.height = Math.round(viewport.height);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Canvas 2D context unavailable');
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    await (page.render({ canvasContext: ctx, viewport } as any) as any).promise;
+    // intent 'print': pdf.js drives display-intent rendering with requestAnimationFrame,
+    // which browsers pause in background/hidden tabs — a user switching tabs mid-OCR
+    // would stall extraction forever. Print intent uses timers and renders identically
+    // for rasterization purposes.
+    await withTimeout<void>(
+      (page.render({ canvasContext: ctx, viewport, intent: 'print' } as any) as any).promise,
+      30000,
+      `pdf.js render(${pageNum})`
+    );
+
+    // 1) Native vector text layer (digital PDFs): exact coordinates, no OCR needed.
+    const textContent: any = await withTimeout<any>(page.getTextContent(), 20000, `pdf.js getTextContent(${pageNum})`);
+    const pageTokens: ExtractedSpatialToken[] = [];
+    let idx = 0;
+    for (const item of textContent.items as any[]) {
+      const str = (item.str || '').trim();
+      if (!str) continue;
+      const [cx, cy] = viewport.convertToViewportPoint(item.transform[4], item.transform[5]);
+      const h = Math.max(8, Math.round(Math.abs(item.transform[3]) * displayScale));
+      const w = Math.max(6, Math.round((item.width || 0) * displayScale));
+      pageTokens.push({
+        id: `pdf_token_${idx++}_p${pageNum}`,
+        text: str,
+        x: Math.round(cx),
+        y: Math.round(cy - h),
+        width: w,
+        height: h,
+        page: pageNum,
+        confidence: 100,
+      });
+    }
+
+    // A digital page has a usable text layer; only genuinely empty pages (scans) go to OCR.
+    const textChars = pageTokens.reduce((n, t) => n + t.text.length, 0);
+    if (import.meta.env.DEV) console.debug(`[ocr:dev] page ${pageNum}: ${pageTokens.length} text items, ${textChars} chars`);
+    if (pageTokens.length >= TEXT_LAYER_MIN_TOKENS || textChars >= TEXT_LAYER_MIN_CHARS) {
+      usedTextLayer = true;
+      allTokens.push(...pageTokens);
+      allTextPieces.push(pageTokens.map((t) => t.text).join(' '));
+      pageRasters.set(pageNum, ctx.getImageData(0, 0, canvas.width, canvas.height));
+      continue;
+    }
+
+    // 2) Scanned page: supersample the render, then OCR it.
+    onProgress?.(Math.round(base), 'Supersampling page…', pageLabel);
+    const ocrScale = Math.min(displayScale * OCR_SUPERSAMPLE, OCR_MAX_WIDTH / unscaled.width);
+    const ocrViewport = page.getViewport({ scale: ocrScale });
+    const off = document.createElement('canvas');
+    off.width = Math.round(ocrViewport.width);
+    off.height = Math.round(ocrViewport.height);
+    const octx = off.getContext('2d');
+    if (octx) {
+      await withTimeout<void>(
+        (page.render({ canvasContext: octx, viewport: ocrViewport, intent: 'print' } as any) as any).promise,
+        60000,
+        `pdf.js hi-res render(${pageNum})`
+      );
+    }
+
+    // Primary: geometric cleanup (perspective + deskew, colour preserved) → local
+    // Surya sidecar. A neural recognizer reads a flat, upright page best, and its
+    // boxes then align with the displayed (corrected) raster.
+    const photo = await preprocessForOcr(
+      off,
+      (p, st) => onProgress?.(Math.round(base + (p * 0.3 * span) / 100), st, pageLabel),
+      { mode: 'photo' }
+    );
+    const surya = await ocrViaSurya(photo, DISPLAY_WIDTH / Math.max(1, photo.width), pageNum);
+    if (surya) {
+      usedSurya = true;
+      drawCleanedToDisplay(canvas, photo);
+      allTokens.push(...surya.tokens);
+      allTextPieces.push(surya.rawText);
+      pageRasters.set(pageNum, ctx.getImageData(0, 0, canvas.width, canvas.height));
+      continue;
+    }
+
+    // Fallback: binarizing cleanup → in-browser Tesseract.
+    usedTesseract = true;
+    const cleaned = await preprocessForOcr(off, (p, st) =>
+      onProgress?.(Math.round(base + (p * 0.4 * span) / 100), st, pageLabel)
+    );
+    drawCleanedToDisplay(canvas, cleaned);
+    const { words, rawText } = await runTesseract(cleaned, (p, st) =>
+      onProgress?.(Math.round(base + ((40 + p * 0.6) * span) / 100), st, pageLabel)
+    );
+    const factor = canvas.width / Math.max(1, cleaned.width);
+    allTokens.push(...mapWordsToTokens(words, factor, 'ocr_token', pageNum));
+    allTextPieces.push(rawText);
+    pageRasters.set(pageNum, ctx.getImageData(0, 0, canvas.width, canvas.height));
   }
 
-  // 1) Native vector text layer
-  const textContent = await page.getTextContent();
-  const textTokens: ExtractedSpatialToken[] = [];
-  const textPieces: string[] = [];
-  let idx = 0;
-  for (const item of textContent.items as any[]) {
-    const str = (item.str || '').trim();
-    if (!str) continue;
-    textPieces.push(str);
-    const [cx, cy] = viewport.convertToViewportPoint(item.transform[4], item.transform[5]);
-    const h = Math.max(8, Math.round(Math.abs(item.transform[3]) * displayScale));
-    const w = Math.max(6, Math.round((item.width || 0) * displayScale));
-    textTokens.push({
-      id: `pdf_token_${idx++}`,
-      text: str,
-      x: Math.round(cx),
-      y: Math.round(cy - h),
-      width: w,
-      height: h,
-      page: 1,
-      confidence: 100,
-    });
+  if (import.meta.env.DEV) console.debug(`[ocr:dev] all ${numPages} pages done; tokens=${allTokens.length}`);
+  // Leave page 1 on the visible canvas.
+  const p1 = pageRasters.get(1);
+  if (p1) {
+    canvas.width = p1.width;
+    canvas.height = p1.height;
+    canvas.getContext('2d')?.putImageData(p1, 0, 0);
   }
 
-  if (textTokens.length >= TEXT_LAYER_MIN_TOKENS) {
-    return {
-      tokens: textTokens,
-      rawText: textPieces.join('\n'),
-      meanConfidence: 100,
-      width: canvas.width,
-      height: canvas.height,
-      numPages: pdf.numPages,
-      usedOcrFallback: false,
-      engineLabel: 'pdf.js Vector Text Matrix · Native Spatial',
-    };
-  }
-
-  // 2) Scanned PDF: supersample the page, then OCR it.
-  const ocrScale = Math.min(displayScale * OCR_SUPERSAMPLE, OCR_MAX_WIDTH / unscaled.width);
-  const ocrViewport = page.getViewport({ scale: ocrScale });
-  const off = document.createElement('canvas');
-  off.width = Math.round(ocrViewport.width);
-  off.height = Math.round(ocrViewport.height);
-  const octx = off.getContext('2d');
-  if (octx) {
-    await (page.render({ canvasContext: octx, viewport: ocrViewport } as any) as any).promise;
-  }
-
-  // Primary: local Surya sidecar on the raw high-res page render.
-  // Geometric cleanup first (perspective + deskew, colour preserved): a neural
-  // recognizer reads a flat, upright card best and its boxes then align with
-  // the displayed (corrected) raster.
-  const photo = await preprocessForOcr(off, (p, s) => onProgress?.(Math.round(p * 0.3), s), { mode: 'photo' });
-  const suryaFactor = DISPLAY_WIDTH / Math.max(1, photo.width);
-  const surya = await ocrViaSurya(photo, suryaFactor);
-  if (surya) {
-    drawCleanedToDisplay(canvas, photo);
-    return {
-      tokens: surya.tokens,
-      rawText: surya.rawText,
-      meanConfidence: surya.meanConfidence,
-      width: canvas.width,
-      height: canvas.height,
-      numPages: pdf.numPages,
-      usedOcrFallback: false,
-      engineLabel: 'Surya OCR · Local Sidecar (127.0.0.1)',
-    };
-  }
-
-  // Fallback: OpenCV cleanup + in-browser Tesseract.
-  const cleaned = await preprocessForOcr(off, (p, s) => onProgress?.(Math.round(p * 0.4), s));
-  drawCleanedToDisplay(canvas, cleaned);
-  const { words, rawText } = await runTesseract(cleaned, (p, s) =>
-    onProgress?.(40 + Math.round(p * 0.6), s)
-  );
-  const factor = canvas.width / Math.max(1, cleaned.width);
-  const tokens = mapWordsToTokens(words, factor, 'ocr_token');
+  const textNote = usedTextLayer ? ' + pdf.js text layer' : '';
+  const engineLabel = usedSurya
+    ? `Surya OCR · Local Sidecar (127.0.0.1)${textNote}`
+    : usedTesseract
+      ? `Tesseract LSTM · Scanned PDF (OpenCV cleaned)${textNote}`
+      : 'pdf.js Vector Text Matrix · Native Spatial';
 
   return {
-    tokens,
-    rawText,
-    meanConfidence: meanConfidence(tokens),
-    width: canvas.width,
-    height: canvas.height,
-    numPages: pdf.numPages,
-    usedOcrFallback: true,
-    engineLabel: 'Tesseract LSTM · Scanned PDF (OpenCV cleaned)',
+    tokens: allTokens,
+    rawText: allTextPieces.join('\n'),
+    meanConfidence: meanConfidence(allTokens),
+    width: p1?.width || canvas.width,
+    height: p1?.height || canvas.height,
+    numPages,
+    usedOcrFallback: usedTesseract,
+    pageRasters,
+    engineLabel,
   };
+  } finally {
+    // Release the pdf.js document + its worker; rasters/tokens are already captured.
+    try {
+      if (typeof pdf?.destroy === 'function') await pdf.destroy();
+      else if (typeof loadingTask?.destroy === 'function') await loadingTask.destroy();
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 function loadImageElement(file: File): Promise<HTMLImageElement> {
@@ -428,15 +495,18 @@ async function extractImageDocument(
     octx.drawImage(img, 0, 0, off.width, off.height);
   }
 
-  // Primary: local Surya sidecar on the raw high-res render.
-  // Geometric cleanup first (perspective + deskew, colour preserved): a neural
-  // recognizer reads a flat, upright card best and its boxes then align with
-  // the displayed (corrected) raster.
-  const photo = await preprocessForOcr(off, (p, s) => onProgress?.(Math.round(p * 0.3), s), { mode: 'photo' });
-  const suryaFactor = DISPLAY_WIDTH / Math.max(1, photo.width);
-  const surya = await ocrViaSurya(photo, suryaFactor);
+  const pageRasters = new Map<number, ImageData>();
+  const snapshot = () => {
+    const ctx = canvas.getContext('2d');
+    if (ctx) pageRasters.set(1, ctx.getImageData(0, 0, canvas.width, canvas.height));
+  };
+
+  // Primary: geometric cleanup (perspective + deskew, colour preserved) → Surya.
+  const photo = await preprocessForOcr(off, (p, st) => onProgress?.(Math.round(p * 0.3), st), { mode: 'photo' });
+  const surya = await ocrViaSurya(photo, DISPLAY_WIDTH / Math.max(1, photo.width), 1);
   if (surya) {
     drawCleanedToDisplay(canvas, photo);
+    snapshot();
     return {
       tokens: surya.tokens,
       rawText: surya.rawText,
@@ -445,19 +515,18 @@ async function extractImageDocument(
       height: canvas.height,
       numPages: 1,
       usedOcrFallback: false,
+      pageRasters,
       engineLabel: 'Surya OCR · Local Sidecar (127.0.0.1)',
     };
   }
 
-  // Fallback: OpenCV cleanup (illumination/perspective/deskew/binarize) + Tesseract.
-  const cleaned = await preprocessForOcr(off, (p, s) => onProgress?.(Math.round(p * 0.4), s));
+  // Fallback: binarizing cleanup (illumination/perspective/deskew) → Tesseract.
+  const cleaned = await preprocessForOcr(off, (p, st) => onProgress?.(Math.round(p * 0.4), st));
   drawCleanedToDisplay(canvas, cleaned);
-
-  const { words, rawText } = await runTesseract(cleaned, (p, s) =>
-    onProgress?.(40 + Math.round(p * 0.6), s)
-  );
+  snapshot();
+  const { words, rawText } = await runTesseract(cleaned, (p, st) => onProgress?.(40 + Math.round(p * 0.6), st));
   const factor = canvas.width / Math.max(1, cleaned.width);
-  const tokens = mapWordsToTokens(words, factor, 'ocr_token');
+  const tokens = mapWordsToTokens(words, factor, 'ocr_token', 1);
 
   return {
     tokens,
@@ -467,6 +536,7 @@ async function extractImageDocument(
     height: canvas.height,
     numPages: 1,
     usedOcrFallback: true,
+    pageRasters,
     engineLabel: 'Tesseract LSTM · Raster Image (OpenCV cleaned)',
   };
 }
@@ -485,12 +555,13 @@ interface LineMatch {
 }
 
 function groupLines(tokens: ExtractedSpatialToken[]): ExtractedSpatialToken[][] {
-  const sorted = [...tokens].sort((a, b) => a.y - b.y || a.x - b.x);
+  const sorted = [...tokens].sort((a, b) => a.page - b.page || a.y - b.y || a.x - b.x);
   const lines: ExtractedSpatialToken[][] = [];
   for (const t of sorted) {
     const tc = t.y + t.height / 2;
     let placed: ExtractedSpatialToken[] | undefined;
     for (const line of lines) {
+      if (line[0].page !== t.page) continue; // never merge rows across pages
       const rc = line.reduce((s, x) => s + (x.y + x.height / 2), 0) / line.length;
       const rh = line.reduce((s, x) => s + x.height, 0) / line.length;
       if (Math.abs(tc - rc) <= Math.max(rh, t.height) * 0.5) {
@@ -590,7 +661,7 @@ export function classifyExtractedTargets(
         classification: 'Government Identifier (Sensitive PII)',
         extractedValue: mt.text,
         ...unionBox(mt.tokens),
-        page: 1,
+        page: mt.tokens[0].page,
         action: 'DIRECT_BURN',
         source: 'OCR_AUTO',
         confidence: tokenConfidence(mt.tokens),
@@ -606,7 +677,7 @@ export function classifyExtractedTargets(
         classification: 'Contact Identifier (PII)',
         extractedValue: mt.text,
         ...unionBox(mt.tokens),
-        page: 1,
+        page: mt.tokens[0].page,
         action: 'DIRECT_BURN',
         source: 'OCR_AUTO',
         confidence: tokenConfidence(mt.tokens),
@@ -635,7 +706,7 @@ export function classifyExtractedTargets(
         classification: 'Contact Identifier (PII)',
         extractedValue: mt.text,
         ...unionBox(mt.tokens),
-        page: 1,
+        page: mt.tokens[0].page,
         action: 'DIRECT_BURN',
         source: 'OCR_AUTO',
         confidence: tokenConfidence(mt.tokens),
@@ -665,7 +736,7 @@ export function classifyExtractedTargets(
         numericValue: c.value,
         satisfiesThreshold: isWitness ? c.value >= thresholdValue : undefined,
         ...unionBox(c.tokens),
-        page: 1,
+        page: c.tokens[0].page,
         action: isWitness ? 'PROVE_AND_BURN' : 'DIRECT_BURN',
         source: 'OCR_AUTO',
         confidence: c.confidence,
@@ -684,7 +755,7 @@ export function classifyExtractedTargets(
           classification: 'Sensitive Document Content',
           extractedValue: t.text,
           ...unionBox([t]),
-          page: 1,
+          page: t.page,
           action: 'DIRECT_BURN',
           source: 'OCR_AUTO',
           confidence: t.confidence ?? 100,
@@ -814,7 +885,7 @@ export function classifyForScenario(
             extractedValue: mt.text,
             numericValue: field.numeric ? parseAmount(mt.text) : undefined,
             ...unionBox(mt.tokens),
-            page: 1,
+            page: mt.tokens[0].page,
             action: field.action,
             source: 'OCR_AUTO',
             confidence: tokenConfidence(mt.tokens),
@@ -831,7 +902,7 @@ export function classifyForScenario(
             classification: field.classification,
             extractedValue: mv.text,
             ...unionBox(mv.tokens),
-            page: 1,
+            page: mv.tokens[0].page,
             action: field.action,
             source: 'OCR_AUTO',
             confidence: tokenConfidence(mv.tokens),
@@ -880,7 +951,7 @@ export function classifyForScenario(
         numericValue: best.age,
         satisfiesThreshold: best.age >= opts.thresholdValue,
         ...unionBox(best.mt.tokens),
-        page: 1,
+        page: best.mt.tokens[0].page,
         action: ageField.action,
         source: 'OCR_AUTO',
         confidence: tokenConfidence(best.mt.tokens),
@@ -929,7 +1000,7 @@ export function classifyForScenario(
         classification: nameAboveField.classification,
         extractedValue: clusterText,
         ...unionBox(toks),
-        page: 1,
+        page: toks[0].page,
         action: nameAboveField.action,
         source: 'OCR_AUTO',
         confidence: tokenConfidence(toks),
@@ -969,7 +1040,7 @@ export function classifyForScenario(
           y: Math.round(y0),
           width: Math.round(x1 - x0),
           height: Math.round(photoH),
-          page: 1,
+          page: anchorLine[0].page,
           action: photoField.action,
           source: 'OCR_AUTO',
           fieldKey: photoField.key,
@@ -1021,7 +1092,7 @@ export function classifyForScenario(
           numericValue: c.value,
           satisfiesThreshold: c.value >= opts.thresholdValue,
           ...unionBox(c.tokens),
-          page: 1,
+          page: c.tokens[0].page,
           action: 'PROVE_AND_BURN',
           source: 'OCR_AUTO',
           confidence: c.confidence,
@@ -1035,7 +1106,7 @@ export function classifyForScenario(
           extractedValue: c.text,
           numericValue: c.value,
           ...unionBox(c.tokens),
-          page: 1,
+          page: c.tokens[0].page,
           action: 'DIRECT_BURN',
           source: 'OCR_AUTO',
           confidence: c.confidence,
@@ -1057,7 +1128,7 @@ export function classifyForScenario(
           classification: 'Sensitive Document Content',
           extractedValue: t.text,
           ...unionBox([t]),
-          page: 1,
+          page: t.page,
           action: 'DIRECT_BURN',
           source: 'OCR_AUTO',
           confidence: t.confidence ?? 100,
@@ -1089,6 +1160,7 @@ export async function extractDocumentSpatial(
     height: canvas.height,
     numPages: 1,
     usedOcrFallback: false,
+    pageRasters: new Map(),
     engineLabel: 'Inert · Unsupported Document Type',
   };
 
