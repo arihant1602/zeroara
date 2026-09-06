@@ -1,11 +1,14 @@
 import React, { useState } from 'react';
-import { Network, Radio, ExternalLink, ArrowLeft } from 'lucide-react';
+import { Radio, ExternalLink } from 'lucide-react';
 
 interface TransportProtocolViewProps {
   onBackToStudio?: () => void;
+  onNavigateToStage?: (stage: number) => void;
 }
 
-export const TransportProtocolView: React.FC<TransportProtocolViewProps> = ({ onBackToStudio }) => {
+export const TransportProtocolView: React.FC<TransportProtocolViewProps> = ({
+  onNavigateToStage,
+}) => {
   const [simulatedOrigin, setSimulatedOrigin] = useState('https://apex-lending.io');
   const [threshold, setThreshold] = useState(150000);
   const [generatedUri, setGeneratedUri] = useState('');
@@ -27,59 +30,13 @@ export const TransportProtocolView: React.FC<TransportProtocolViewProps> = ({ on
   };
 
   return (
-    <div className="view-container" style={{ maxWidth: '1200px', gap: '24px' }}>
-      {/* Header Card */}
-      <div className="neu-card" style={{ padding: '28px', borderRadius: '32px', gap: '16px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
-            <div
-              style={{
-                width: '44px',
-                height: '44px',
-                borderRadius: '50%',
-                backgroundColor: 'var(--bg-surface)',
-                boxShadow: 'var(--shadow-inset)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                color: 'var(--accent)',
-              }}
-            >
-              <Network size={24} />
-            </div>
-            <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                <h2 style={{ fontFamily: 'var(--font-display)', fontSize: '1.25rem', fontWeight: 800, color: 'var(--fg-primary)' }}>
-                  LAYER 8: WEB-TO-DESKTOP TRANSPORT & DEEP LINK PROTOCOL
-                </h2>
-                <span className="neu-badge">UNDER CONSTRUCTION · TARGET v0.4</span>
-              </div>
-              <p style={{ fontSize: '0.82rem', color: 'var(--fg-muted)', marginTop: '2px' }}>
-                Secure bi-directional deep linking (<code className="mono">zeroara://verify</code>) and local loopback IPC for web verification.
-              </p>
-            </div>
-          </div>
-
-          {onBackToStudio && (
-            <button
-              type="button"
-              className="neu-btn-secondary"
-              style={{ fontSize: '0.82rem', padding: '8px 16px', gap: '6px' }}
-              onClick={onBackToStudio}
-            >
-              <ArrowLeft size={14} />
-              <span>Back to Studio</span>
-            </button>
-          )}
-        </div>
-      </div>
-
+    <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '20px' }}>
       {/* Blank Section Placeholder Card */}
-      <div className="neu-card" style={{ padding: '48px 32px', borderRadius: '32px', alignItems: 'center', textAlign: 'center', gap: '20px' }}>
+      <div className="neu-card" style={{ padding: '40px 32px', borderRadius: '28px', alignItems: 'center', textAlign: 'center', gap: '20px' }}>
         <div
           style={{
-            width: '80px',
-            height: '80px',
+            width: '72px',
+            height: '72px',
             borderRadius: '50%',
             backgroundColor: 'var(--bg-surface)',
             boxShadow: 'var(--shadow-extruded)',
@@ -158,6 +115,17 @@ export const TransportProtocolView: React.FC<TransportProtocolViewProps> = ({ on
             </div>
           )}
         </div>
+
+        {onNavigateToStage && (
+          <button
+            type="button"
+            className="neu-btn-secondary"
+            style={{ fontSize: '0.82rem', padding: '10px 18px', gap: '6px', alignSelf: 'center', marginTop: '6px' }}
+            onClick={() => onNavigateToStage(1)}
+          >
+            <span>← Return to Stage 1: Document Ingestion</span>
+          </button>
+        )}
       </div>
     </div>
   );

@@ -29,10 +29,9 @@ import {
   Building2,
   ShieldCheck,
   WifiOff,
-  Hash,
   CheckCircle2,
-  Scan,
   Crosshair,
+  ArrowLeft,
   ArrowRight,
   Plus,
   Trash2,
@@ -47,7 +46,6 @@ import {
   Fingerprint,
   AlertTriangle,
   Binary,
-  Network,
 } from 'lucide-react';
 import {
   VerifierPortalView,
@@ -84,11 +82,53 @@ export interface OcrTelemetrySummary {
   targetsFound: number;
 }
 
-export type MainAppView = 'STUDIO' | 'VERIFIER' | 'ENCLAVE' | 'TRANSPORT';
+export type StageNumber = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+
+export const STAGE_CONFIG: Record<StageNumber, { title: string; subtitle: string; telemetryTitle: string }> = {
+  1: {
+    title: 'Document Ingest & SHA-256 Preimage Digest',
+    subtitle: 'Loads raw file into private browser RAM isolate and anchors immutable 256-bit root hash.',
+    telemetryTitle: 'Stage 1: Preimage Cryptographic Telemetry',
+  },
+  2: {
+    title: 'Spatial OCR & Target Geometry Extraction',
+    subtitle: 'Parses exact pixel coordinates [x, y, w, h] to classify sensitive PII zones and witness targets.',
+    telemetryTitle: 'Stage 2: OCR Spatial Geometry Telemetry',
+  },
+  3: {
+    title: 'Physical Pixel Burning & Stream Stripping',
+    subtitle: 'Overwrites visual pixels with solid #000000 and purges underlying PDF text stream objects.',
+    telemetryTitle: 'Stage 3: Redaction Sanitization Audit',
+  },
+  4: {
+    title: 'Client-Side Groth16 Zero-Knowledge Prover',
+    subtitle: 'Executes bilinear pairing constraints over BN128 curve in zero knowledge with 0 private bytes leaked.',
+    telemetryTitle: 'Stage 4: Groth16 zk-SNARK Telemetry',
+  },
+  5: {
+    title: 'Quad-Factor Master Audit Seal Generation',
+    subtitle: 'Bonds Preimage Digest, Bounding Geometry, Poseidon Commitment, and SNARK Proof into an unforgeable seal.',
+    telemetryTitle: 'Stage 5: Master Audit Seal Telemetry',
+  },
+  6: {
+    title: 'Standalone Enterprise Verifier Portal',
+    subtitle: 'External compliance auditor evaluating 5 mathematical verification gates with built-in attack simulator.',
+    telemetryTitle: 'Stage 6: Enterprise Verifier Suite',
+  },
+  7: {
+    title: 'Hardware Enclave & TPM 2.0 Attestation',
+    subtitle: 'Hardware security module: physical TPM 2.0 & Apple Secure Enclave root key attestation with POSIX mlock.',
+    telemetryTitle: 'Stage 7: Hardware Enclave Blueprint',
+  },
+  8: {
+    title: 'Web-to-Desktop Transport Protocol',
+    subtitle: 'zeroara:// deep linking and local loopback IPC for sovereign cross-domain web attestation.',
+    telemetryTitle: 'Stage 8: Transport Protocol Specification',
+  },
+};
 
 export function App() {
-  const [mainView, setMainView] = useState<MainAppView>('STUDIO');
-  const [activePhase, setActivePhase] = useState<1 | 2 | 3 | 4 | 5>(1);
+  const [stage, setStage] = useState<StageNumber>(1);
   const [doc, setDoc] = useState<IngestedDoc | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -195,7 +235,7 @@ export function App() {
         });
 
         // Overlay bounding boxes if in Phase 2
-        if (activePhase === 2 && showHudOverlays) {
+        if (stage === 2 && showHudOverlays) {
           drawBoundingBoxOverlays(canvas, result.targets, result.targets[0]?.id || null);
         }
       } catch (err) {
@@ -214,7 +254,7 @@ export function App() {
     };
   }, [doc]);
 
-  // Synchronous blit & redraw overlays whenever Phase, HUD toggle, or target selection changes
+  // Synchronous blit & redraw overlays whenever Stage, HUD toggle, or target selection changes
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !cleanCanvasDataRef.current) return;
@@ -225,13 +265,13 @@ export function App() {
     // Restore pristine document raster
     ctx.putImageData(cleanCanvasDataRef.current, 0, 0);
 
-    // Draw active bounding box overlays if in Phase 2
-    if (activePhase === 2 && showHudOverlays && detectedFields.length > 0) {
+    // Draw active bounding box overlays if in Stage 2
+    if (stage === 2 && showHudOverlays && detectedFields.length > 0) {
       drawBoundingBoxOverlays(canvas, detectedFields, selectedFieldId);
     }
-  }, [activePhase, showHudOverlays, selectedFieldId, detectedFields]);
+  }, [stage, showHudOverlays, selectedFieldId, detectedFields]);
 
-  // Execute Phase 3: Physical Pixel Burning & Text Stream Stripping
+  // Execute Stage 3: Physical Pixel Burning & Text Stream Stripping
   const executePixelBurn = async () => {
     const canvas = canvasRef.current;
     if (!canvas || detectedFields.length === 0) return;
@@ -247,7 +287,7 @@ export function App() {
       const result = await createFlattenedRedactedPdf(canvas, detectedFields);
       setRedactionResult(result);
       setViewMode('BURNED');
-      setActivePhase(3);
+      setStage(3);
     } catch (err) {
       console.error('Redaction flattening error:', err);
     } finally {
@@ -270,7 +310,7 @@ export function App() {
     }
   };
 
-  // Execute Phase 4: Generate Client-Side Groth16 Zero-Knowledge Proof
+  // Execute Stage 4: Generate Client-Side Groth16 Zero-Knowledge Proof
   const executeZkProof = async () => {
     setProverError(null);
     setInvalidationMessage(null);
@@ -299,7 +339,7 @@ export function App() {
       setProofResult(res);
       setProofVerified(res.verified);
       setProofVerifyLatencyMs(res.verificationLatencyMs);
-      setActivePhase(4);
+      setStage(4);
     } catch (err: any) {
       console.error('Groth16 proving error:', err);
       setProverError(err?.message || 'In-browser Groth16 proof generation failed.');
@@ -387,7 +427,7 @@ export function App() {
       };
 
       setAuditPackage(pkg);
-      setActivePhase(5);
+      setStage(5);
     } catch (err) {
       console.error('Master seal generation error:', err);
     } finally {
@@ -457,7 +497,7 @@ export function App() {
     setRedactionResult(null);
     invalidateDownstreamState('New document uploaded — previous proofs and seals cleared.');
     setViewMode('ORIGINAL');
-    setActivePhase(1);
+    setStage(1);
   };
 
   // Ingest synthesized authentic sample PDF document
@@ -481,23 +521,28 @@ export function App() {
     setRedactionResult(null);
     invalidateDownstreamState('Sample document loaded — previous proofs and seals cleared.');
     setViewMode('ORIGINAL');
-    setActivePhase(1);
+    setStage(1);
   };
 
   // Support URL parameters for automated verification & presets
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const viewParam = params.get('view')?.toUpperCase();
-    if (viewParam === 'VERIFIER') setMainView('VERIFIER');
-    else if (viewParam === 'ENCLAVE') setMainView('ENCLAVE');
-    else if (viewParam === 'TRANSPORT') setMainView('TRANSPORT');
+    if (viewParam === 'VERIFIER') setStage(6);
+    else if (viewParam === 'ENCLAVE') setStage(7);
+    else if (viewParam === 'TRANSPORT') setStage(8);
 
-    if (params.get('sample') === 'true' || params.get('phase')) {
+    const stageParam = params.get('stage') || params.get('phase');
+    if (stageParam) {
+      const s = parseInt(stageParam, 10);
+      if (s >= 1 && s <= 8) setStage(s as StageNumber);
+    }
+
+    if (params.get('sample') === 'true') {
       handleLoadSample().then(() => {
-        const p = params.get('phase');
-        if (p === '2') {
-          setActivePhase(2);
-        } else if (p === '3') {
+        if (stageParam === '2') {
+          setStage(2);
+        } else if (stageParam === '3') {
           setTimeout(() => {
             executePixelBurn();
           }, 600);
@@ -630,64 +675,6 @@ export function App() {
               </span>
             </div>
 
-            {/* Modular Protocol Layer Switcher */}
-            <div className="neu-nav-track" style={{ margin: '0 8px' }}>
-              <button
-                type="button"
-                className={`neu-nav-btn ${mainView === 'STUDIO' ? 'active' : ''}`}
-                onClick={() => setMainView('STUDIO')}
-                style={{ display: 'flex', alignItems: 'center', gap: '7px' }}
-              >
-                <FileText size={14} />
-                <span>Redaction Studio</span>
-              </button>
-
-              <button
-                type="button"
-                className={`neu-nav-btn ${mainView === 'VERIFIER' ? 'active' : ''}`}
-                onClick={() => setMainView('VERIFIER')}
-                style={{ display: 'flex', alignItems: 'center', gap: '7px', position: 'relative' }}
-              >
-                <ShieldCheck size={14} />
-                <span>Enterprise Verifier</span>
-                {auditPackage && (
-                  <span
-                    style={{
-                      width: '7px',
-                      height: '7px',
-                      borderRadius: '50%',
-                      backgroundColor: 'var(--accent)',
-                      boxShadow: '0 0 6px rgba(234, 88, 12, 0.8)',
-                      display: 'inline-block',
-                    }}
-                    title="Audit Package Ready for Verification"
-                  />
-                )}
-              </button>
-
-              <button
-                type="button"
-                className={`neu-nav-btn ${mainView === 'ENCLAVE' ? 'active' : ''}`}
-                onClick={() => setMainView('ENCLAVE')}
-                style={{ display: 'flex', alignItems: 'center', gap: '7px' }}
-              >
-                <Cpu size={14} />
-                <span>Hardware Enclave</span>
-                <span style={{ fontSize: '0.65rem', padding: '1px 6px', borderRadius: '6px', backgroundColor: 'rgba(107, 114, 128, 0.15)', color: 'var(--fg-muted)', fontWeight: 700 }}>v0.3</span>
-              </button>
-
-              <button
-                type="button"
-                className={`neu-nav-btn ${mainView === 'TRANSPORT' ? 'active' : ''}`}
-                onClick={() => setMainView('TRANSPORT')}
-                style={{ display: 'flex', alignItems: 'center', gap: '7px' }}
-              >
-                <Network size={14} />
-                <span>Transport Protocol</span>
-                <span style={{ fontSize: '0.65rem', padding: '1px 6px', borderRadius: '6px', backgroundColor: 'rgba(107, 114, 128, 0.15)', color: 'var(--fg-muted)', fontWeight: 700 }}>v0.4</span>
-              </button>
-            </div>
-
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               {doc ? (
                 <button
@@ -701,7 +688,7 @@ export function App() {
                     setOcrTelemetry(null);
                     setRedactionResult(null);
                     setViewMode('ORIGINAL');
-                    setActivePhase(1);
+                    setStage(1);
                   }}
                 >
                   <RefreshCw size={13} />
@@ -720,369 +707,91 @@ export function App() {
             </div>
           </div>
 
-          {mainView === 'STUDIO' && (
-            <>
-              {/* Sequential 5-Phase Progress Track */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '14px' }}>
-            {/* Phase 1 Stepper Node */}
-            <div
-              onClick={() => setActivePhase(1)}
-              className={`neu-step-node ${activePhase === 1 ? 'active' : ''}`}
-            >
-              <div className="neu-step-icon-well" style={{ color: doc ? 'var(--accent-secondary)' : 'var(--accent)' }}>
-                {doc ? <Check size={16} /> : <FileText size={16} />}
-              </div>
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: '0.82rem', fontWeight: 800, color: 'var(--fg-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  1. Ingest & Digest
+          {/* Unified Protocol Stage Progress Header */}
+          <div className="neu-card" style={{ padding: '18px 24px', borderRadius: '24px', gap: '14px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+                <div
+                  style={{
+                    width: '42px',
+                    height: '42px',
+                    borderRadius: '50%',
+                    backgroundColor: 'var(--bg-surface)',
+                    boxShadow: 'var(--shadow-inset-sm)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: 'var(--accent)',
+                    fontSize: '0.9rem',
+                    fontWeight: 800,
+                    fontFamily: 'var(--font-mono)',
+                    flexShrink: 0,
+                  }}
+                >
+                  {stage}
                 </div>
-                <div style={{ fontSize: '0.68rem', color: 'var(--fg-muted)', marginTop: '2px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {doc ? `Root: ${doc.hashHex.substring(0, 8)}...` : 'Awaiting File'}
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                    <h2 style={{ fontFamily: 'var(--font-display)', fontSize: '1.15rem', fontWeight: 800, color: 'var(--fg-primary)', letterSpacing: '-0.01em' }}>
+                      {STAGE_CONFIG[stage].title}
+                    </h2>
+                    <span className="neu-badge" style={{ fontSize: '0.72rem', padding: '3px 9px' }}>
+                      {stage} / 8
+                    </span>
+                  </div>
+                  <p style={{ fontSize: '0.78rem', color: 'var(--fg-muted)', marginTop: '2px' }}>
+                    {STAGE_CONFIG[stage].subtitle}
+                  </p>
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <span className="neu-status-pill" style={{ padding: '6px 14px', fontSize: '0.75rem', fontFamily: 'var(--font-mono)' }}>
+                  {Math.round((stage / 8) * 100)}% COMPLETE
+                </span>
+                <div style={{ display: 'flex', gap: '6px' }}>
+                  <button
+                    type="button"
+                    className="neu-btn-secondary"
+                    style={{ padding: '7px 14px', fontSize: '0.78rem', gap: '5px' }}
+                    onClick={() => setStage((prev) => Math.max(1, prev - 1) as StageNumber)}
+                    disabled={stage === 1}
+                  >
+                    <ArrowLeft size={13} />
+                    <span>Back</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="neu-btn-primary"
+                    style={{ padding: '7px 16px', fontSize: '0.78rem', gap: '5px' }}
+                    onClick={() => setStage((prev) => Math.min(8, prev + 1) as StageNumber)}
+                    disabled={
+                      (stage === 1 && !doc) ||
+                      (stage === 2 && detectedFields.length === 0) ||
+                      (stage === 3 && !redactionResult) ||
+                      (stage === 4 && !proofResult) ||
+                      (stage === 5 && !masterSeal) ||
+                      stage === 8
+                    }
+                  >
+                    <span>Next</span>
+                    <ArrowRight size={13} />
+                  </button>
                 </div>
               </div>
             </div>
 
-            {/* Phase 2 Stepper Node */}
-            <div
-              onClick={() => doc && setActivePhase(2)}
-              className={`neu-step-node ${activePhase === 2 ? 'active' : ''} ${!doc ? 'disabled' : ''}`}
-            >
-              <div className="neu-step-icon-well" style={{ color: detectedFields.length > 0 ? (activePhase === 2 ? 'var(--accent)' : 'var(--accent-secondary)') : 'var(--fg-muted)' }}>
-                {detectedFields.length > 0 && activePhase !== 2 ? <Check size={16} /> : <Scan size={16} />}
-              </div>
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: '0.82rem', fontWeight: 800, color: 'var(--fg-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  2. OCR Geometry
-                </div>
-                <div style={{ fontSize: '0.68rem', color: 'var(--fg-muted)', marginTop: '2px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {detectedFields.length > 0
-                    ? `${detectedFields.length} Targets`
-                    : doc ? 'Coordinate Scan' : 'Requires Doc'}
-                </div>
-              </div>
-            </div>
-
-            {/* Phase 3 Stepper Node */}
-            <div
-              onClick={() => redactionResult && setActivePhase(3)}
-              className={`neu-step-node ${activePhase === 3 ? 'active' : ''} ${!redactionResult ? 'disabled' : ''}`}
-            >
-              <div className="neu-step-icon-well" style={{ color: redactionResult ? (activePhase === 3 ? 'var(--accent)' : 'var(--accent-secondary)') : 'var(--fg-muted)' }}>
-                {redactionResult && activePhase !== 3 ? <Check size={16} /> : <Flame size={16} />}
-              </div>
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: '0.82rem', fontWeight: 800, color: 'var(--fg-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  3. Pixel Burn
-                </div>
-                <div style={{ fontSize: '0.68rem', color: 'var(--fg-muted)', marginTop: '2px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {redactionResult
-                    ? `Burned (${redactionResult.burnedZonesCount})`
-                    : 'Sanitization'}
-                </div>
-              </div>
-            </div>
-
-            {/* Phase 4 Stepper Node */}
-            <div
-              onClick={() => (proofResult || redactionResult) && setActivePhase(4)}
-              className={`neu-step-node ${activePhase === 4 ? 'active' : ''} ${!redactionResult ? 'disabled' : ''}`}
-            >
-              <div className="neu-step-icon-well" style={{ color: proofResult ? (activePhase === 4 ? 'var(--accent)' : 'var(--accent-secondary)') : 'var(--fg-muted)' }}>
-                {proofResult && activePhase !== 4 ? <Check size={16} /> : <Cpu size={16} />}
-              </div>
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: '0.82rem', fontWeight: 800, color: 'var(--fg-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  4. ZK Prover
-                </div>
-                <div style={{ fontSize: '0.68rem', color: 'var(--fg-muted)', marginTop: '2px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {proofResult ? `Groth16 (${proofResult.durationMs}ms)` : 'Circom SNARK'}
-                </div>
-              </div>
-            </div>
-
-            {/* Phase 5 Stepper Node */}
-            <div
-              onClick={() => (masterSeal || proofResult) && setActivePhase(5)}
-              className={`neu-step-node ${activePhase === 5 ? 'active' : ''} ${!proofResult ? 'disabled' : ''}`}
-            >
-              <div className="neu-step-icon-well" style={{ color: masterSeal ? 'var(--accent-secondary)' : 'var(--fg-muted)' }}>
-                {masterSeal ? <Check size={16} /> : <Fingerprint size={16} />}
-              </div>
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: '0.82rem', fontWeight: 800, color: 'var(--fg-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  5. Master Seal
-                </div>
-                <div style={{ fontSize: '0.68rem', color: 'var(--fg-muted)', marginTop: '2px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {masterSeal ? `Seal: ${masterSeal.sealHex.substring(0, 8)}...` : 'Audit Envelope'}
-                </div>
-              </div>
+            {/* Inset Neumorphic Progress Bar */}
+            <div className="neu-progress-track">
+              <div
+                className="neu-progress-fill"
+                style={{ width: `${(stage / 8) * 100}%` }}
+              />
             </div>
           </div>
 
-          {/* Phase 1 Architecture: 3-Column Structured Breakdown */}
-          {activePhase === 1 && (
-            <div className="neu-card" style={{ padding: '24px 28px', borderRadius: '28px', gap: '16px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <div style={{ width: '32px', height: '32px', borderRadius: '50%', backgroundColor: 'var(--bg-surface)', boxShadow: 'var(--shadow-inset-sm)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--accent)' }}>
-                    <Hash size={18} />
-                  </div>
-                  <div>
-                    <h3 style={{ fontFamily: 'var(--font-display)', fontSize: '1.05rem', fontWeight: 800, color: 'var(--fg-primary)', letterSpacing: '-0.01em' }}>
-                      PHASE 1 ARCHITECTURE: WHY THE SHA-256 PREIMAGE DIGEST MATTERS
-                    </h3>
-                    <p style={{ fontSize: '0.78rem', color: 'var(--fg-muted)' }}>
-                      Before any redaction or zero-knowledge proof occurs, Zeroara generates an unforgeable root hash.
-                    </p>
-                  </div>
-                </div>
-                <span className="neu-hash-pill">ALGORITHM: FIPS 180-4</span>
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '16px' }}>
-                <div className="neu-well" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase' }}>
-                    01. In-Memory Root Ingestion
-                  </div>
-                  <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
-                    Document bytes are loaded directly into browser RAM. No servers, no network requests, zero cloud leaks.
-                  </p>
-                </div>
-
-                <div className="neu-well" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase' }}>
-                    02. Avalanche Sensitivity
-                  </div>
-                  <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
-                    H(Doc) = SHA-256(raw_bytes). Modifying even <strong>1 pixel or character</strong> produces a completely scrambled hash.
-                  </p>
-                </div>
-
-                <div className="neu-well" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase' }}>
-                    03. Cryptographic Proof Anchor
-                  </div>
-                  <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
-                    Irreversibly welds downstream Zero-Knowledge proofs to this exact file, making proof swapping or forgery impossible.
-                  </p>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Phase 2 Architecture: 3-Column Structured Breakdown */}
-          {activePhase === 2 && (
-            <div className="neu-card" style={{ padding: '24px 28px', borderRadius: '28px', gap: '16px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <div style={{ width: '32px', height: '32px', borderRadius: '50%', backgroundColor: 'var(--bg-surface)', boxShadow: 'var(--shadow-inset-sm)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--accent)' }}>
-                    <Scan size={18} />
-                  </div>
-                  <div>
-                    <h3 style={{ fontFamily: 'var(--font-display)', fontSize: '1.05rem', fontWeight: 800, color: 'var(--fg-primary)', letterSpacing: '-0.01em' }}>
-                      PHASE 2 ARCHITECTURE: OCR SPATIAL BOUNDING COORDINATES
-                    </h3>
-                    <p style={{ fontSize: '0.78rem', color: 'var(--fg-muted)' }}>
-                      Local spatial engine parses exact pixel geometry [x, y, w, h] to bind redaction zones to the document layout.
-                    </p>
-                  </div>
-                </div>
-                <span className="neu-hash-pill">
-                  {ocrTelemetry ? ocrTelemetry.engineName : 'CLIENT SPATIAL ENGINE'}
-                </span>
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '16px' }}>
-                <div className="neu-well" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase' }}>
-                    01. Coordinate Extraction
-                  </div>
-                  <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
-                    Extracts {extractedTokens.length} spatial text tokens directly from the document raster without transmitting a single byte outside RAM.
-                  </p>
-                </div>
-
-                <div className="neu-well" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase' }}>
-                    02. Enterprise Witness Matching
-                  </div>
-                  <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
-                    {witnessTarget ? (
-                      <>
-                        Evaluates parsed witness: <strong>{witnessTarget.extractedValue}</strong> against enterprise threshold <strong>&gt;= ${enterpriseSpec.thresholdValue.toLocaleString()} USD</strong>.
-                      </>
-                    ) : (
-                      'Evaluates parsed witness claims against active enterprise threshold criteria.'
-                    )}
-                  </p>
-                </div>
-
-                <div className="neu-well" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase' }}>
-                    03. Seal Geometry Anchor
-                  </div>
-                  <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
-                    Coordinates [x, y, w, h] are hashed directly into the Master Audit Seal. Shifting the redaction box by 1 pixel breaks proof validity.
-                  </p>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Phase 3 Architecture: 3-Column Structured Breakdown */}
-          {activePhase === 3 && (
-            <div className="neu-card" style={{ padding: '24px 28px', borderRadius: '28px', gap: '16px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <div style={{ width: '32px', height: '32px', borderRadius: '50%', backgroundColor: 'var(--bg-surface)', boxShadow: 'var(--shadow-inset-sm)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--accent)' }}>
-                    <Flame size={18} />
-                  </div>
-                  <div>
-                    <h3 style={{ fontFamily: 'var(--font-display)', fontSize: '1.05rem', fontWeight: 800, color: 'var(--fg-primary)', letterSpacing: '-0.01em' }}>
-                      PHASE 3 ARCHITECTURE: PHYSICAL PIXEL BURNING & TEXT STREAM STRIPPING
-                    </h3>
-                    <p style={{ fontSize: '0.78rem', color: 'var(--fg-muted)' }}>
-                      Irreversibly flattens the document into a pure pixel raster, obliterating all underlying text operators and glyph dictionaries.
-                    </p>
-                  </div>
-                </div>
-                <span className="neu-hash-pill">ENGINE: RASTER FLATTEN + SHA-256</span>
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '16px' }}>
-                <div className="neu-well" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase' }}>
-                    01. Physical Memory Overwrite
-                  </div>
-                  <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
-                    Draws solid opaque <strong>#000000</strong> pixels directly over target coordinates in RAM. The original RGB characters are permanently destroyed.
-                  </p>
-                </div>
-
-                <div className="neu-well" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase' }}>
-                    02. Stream & Glyph Obliteration
-                  </div>
-                  <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
-                    Strips all <code>/Font</code>, <code>/Text</code>, and <code>BT...ET</code> streams. Text selection and copy-paste yield exactly <strong>0 characters</strong>.
-                  </p>
-                </div>
-
-                <div className="neu-well" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase' }}>
-                    03. Sanitized Preimage H(Doc_Redacted)
-                  </div>
-                  <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
-                    Computes H(Doc_Redacted) = SHA-256(flattened_bytes), forming an immutable cryptographic bond between the burned file and the downstream ZK proof seal.
-                  </p>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Phase 4 Architecture: 3-Column Structured Breakdown */}
-          {activePhase === 4 && (
-            <div className="neu-card" style={{ padding: '24px 28px', borderRadius: '28px', gap: '16px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <div style={{ width: '32px', height: '32px', borderRadius: '50%', backgroundColor: 'var(--bg-surface)', boxShadow: 'var(--shadow-inset-sm)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--accent)' }}>
-                    <Cpu size={18} />
-                  </div>
-                  <div>
-                    <h3 style={{ fontFamily: 'var(--font-display)', fontSize: '1.05rem', fontWeight: 800, color: 'var(--fg-primary)', letterSpacing: '-0.01em' }}>
-                      PHASE 4 ARCHITECTURE: CLIENT-SIDE ZERO-KNOWLEDGE PROVING ENGINE
-                    </h3>
-                    <p style={{ fontSize: '0.78rem', color: 'var(--fg-muted)' }}>
-                      Generates non-interactive Groth16 zk-SNARK proofs over BN128 inside browser WebAssembly with zero egress.
-                    </p>
-                  </div>
-                </div>
-                <span className="neu-hash-pill">ENGINE: CIRCOM + SNARKJS (BN128 GROTH16)</span>
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '16px' }}>
-                <div className="neu-well" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase' }}>
-                    01. Private Witness Blinding
-                  </div>
-                  <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
-                    Blinds confidential numerical witness with a high-entropy 253-bit scalar salt <em>r</em> generated via <code>crypto.getRandomValues</code> in browser RAM isolate.
-                  </p>
-                </div>
-
-                <div className="neu-well" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase' }}>
-                    02. In-Browser Groth16 Prover
-                  </div>
-                  <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
-                    Evaluates compiled R1CS constraints over BN128 elliptic curve inside client WebAssembly in &lt;1 second with <strong>0 network requests</strong>.
-                  </p>
-                </div>
-
-                <div className="neu-well" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase' }}>
-                    03. Poseidon Pedersen Commitment
-                  </div>
-                  <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
-                    Emits public commitment <code>C = Poseidon(actual, r)</code>. Verifier checks threshold predicate satisfaction without disclosing the raw document balance.
-                  </p>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Phase 5 Architecture: 3-Column Structured Breakdown */}
-          {activePhase === 5 && (
-            <div className="neu-card" style={{ padding: '24px 28px', borderRadius: '28px', gap: '16px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <div style={{ width: '32px', height: '32px', borderRadius: '50%', backgroundColor: 'var(--bg-surface)', boxShadow: 'var(--shadow-inset-sm)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--accent-secondary)' }}>
-                    <Fingerprint size={18} />
-                  </div>
-                  <div>
-                    <h3 style={{ fontFamily: 'var(--font-display)', fontSize: '1.05rem', fontWeight: 800, color: 'var(--fg-primary)', letterSpacing: '-0.01em' }}>
-                      PHASE 5 ARCHITECTURE: QUAD-FACTOR MASTER AUDIT SEAL & VERIFIER ENVELOPE
-                    </h3>
-                    <p style={{ fontSize: '0.78rem', color: 'var(--fg-muted)' }}>
-                      Cryptographically binds the sanitized PDF, bounding geometry, Poseidon witness commitment, and zk-SNARK proof into an unforgeable envelope.
-                    </p>
-                  </div>
-                </div>
-                <span className="neu-hash-pill" style={{ color: 'var(--accent-secondary)' }}>QUAD-FACTOR CRYPTOGRAPHIC SEAL</span>
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '16px' }}>
-                <div className="neu-well" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent-secondary)', textTransform: 'uppercase' }}>
-                    01. Master Cryptographic Anchor
-                  </div>
-                  <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
-                    <code>Seal = SHA-256(H(Doc_Redacted) || BBoxes || Commitment || H(&pi;))</code>. Modifying even 1 bit of any factor invalidates the audit seal.
-                  </p>
-                </div>
-
-                <div className="neu-well" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent-secondary)', textTransform: 'uppercase' }}>
-                    02. Load-Bearing Geometry Defense
-                  </div>
-                  <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
-                    Bounding coordinates [x, y, w, h] are etched into the seal preimage. Shifting the redaction box by 1 pixel causes seal verification failure.
-                  </p>
-                </div>
-
-                <div className="neu-well" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent-secondary)', textTransform: 'uppercase' }}>
-                    03. Portable Verification Package
-                  </div>
-                  <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
-                    Exports an unforgeable JSON audit package verifiable by any enterprise verifier or smart contract in under 30ms.
-                  </p>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Split-Pane: Document Viewport (Left) & Cryptographic Telemetry (Right) */}
+        {/* Stages 1-5 Split-Pane: Document Viewport (Left) & Cryptographic Telemetry (Right) */}
+        {stage <= 5 && (
           <div
             style={{
               display: 'grid',
@@ -1102,7 +811,7 @@ export function App() {
                 </div>
                 {doc && (
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    {activePhase === 2 && (
+                    {stage === 2 && (
                       <button
                         className="neu-pill-btn"
                         style={{ fontSize: '0.72rem', padding: '4px 10px' }}
@@ -1112,7 +821,7 @@ export function App() {
                       </button>
                     )}
 
-                    {activePhase >= 3 && redactionResult && (
+                    {stage >= 3 && redactionResult && (
                       <div style={{ display: 'flex', gap: '4px' }}>
                         <button
                           className={`neu-pill-btn ${viewMode === 'BURNED' ? 'active' : ''}`}
@@ -1133,12 +842,12 @@ export function App() {
                       </div>
                     )}
 
-                    <span className="neu-hash-pill" style={{ color: activePhase === 5 ? 'var(--accent-secondary)' : 'var(--accent)', fontWeight: 700 }}>
-                      {activePhase === 1 && 'STAGE 1: RAW INGEST'}
-                      {activePhase === 2 && `STAGE 2: ${detectedFields.length} TARGETS`}
-                      {activePhase === 3 && 'STAGE 3: PIXEL BURNED & FLATTENED'}
-                      {activePhase === 4 && 'STAGE 4: ZK PROOF ACTIVE'}
-                      {activePhase === 5 && 'STAGE 5: SEAL ANCHORED'}
+                    <span className="neu-hash-pill" style={{ color: stage === 5 ? 'var(--accent-secondary)' : 'var(--accent)', fontWeight: 700 }}>
+                      {stage === 1 && 'STAGE 1: RAW INGEST'}
+                      {stage === 2 && `STAGE 2: ${detectedFields.length} TARGETS`}
+                      {stage === 3 && 'STAGE 3: PIXEL BURNED & FLATTENED'}
+                      {stage === 4 && 'STAGE 4: ZK PROOF ACTIVE'}
+                      {stage === 5 && 'STAGE 5: SEAL ANCHORED'}
                     </span>
                   </div>
                 )}
@@ -1188,23 +897,31 @@ export function App() {
                 </div>
               </div>
 
-              {/* Real Rendered Canvas or Burned Image */}
-              <div style={{ display: doc ? 'flex' : 'none', flexDirection: 'column', gap: '12px' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.78rem' }}>
-                  <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, color: 'var(--fg-primary)' }}>
-                    {doc?.fileName} ({((doc?.fileSizeBytes || 0) / 1024).toFixed(1)} KB)
-                  </span>
-                  <button
-                    className="neu-pill-btn"
-                    style={{ fontSize: '0.72rem', padding: '4px 10px', display: 'flex', alignItems: 'center', gap: '4px' }}
-                    onClick={() => fileInputRef.current?.click()}
-                  >
-                    <RefreshCw size={11} />
-                    <span>Select Different File</span>
-                  </button>
-                </div>
-
-                <div style={{ width: '100%', overflowX: 'auto', display: 'flex', justifyContent: 'center', padding: '10px', backgroundColor: 'var(--bg-surface)', boxShadow: 'var(--shadow-inset-deep)', borderRadius: 'var(--radius-btn)' }}>
+              {/* In-Memory Spatial Document Render Canvas */}
+              <div
+                style={{
+                  display: doc ? 'flex' : 'none',
+                  flexDirection: 'column',
+                  gap: '12px',
+                  alignItems: 'center',
+                  width: '100%',
+                }}
+              >
+                <div
+                  style={{
+                    position: 'relative',
+                    width: '100%',
+                    backgroundColor: 'var(--bg-surface)',
+                    boxShadow: 'var(--shadow-inset)',
+                    borderRadius: '20px',
+                    padding: '16px',
+                    display: 'flex',
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    minHeight: '440px',
+                    overflow: 'auto',
+                  }}
+                >
                   <canvas
                     ref={canvasRef}
                     style={{
@@ -1212,10 +929,10 @@ export function App() {
                       height: 'auto',
                       borderRadius: '12px',
                       boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
-                      display: (activePhase >= 3 && viewMode === 'BURNED' && redactionResult) ? 'none' : 'block',
+                      display: (stage >= 3 && viewMode === 'BURNED' && redactionResult) ? 'none' : 'block',
                     }}
                   />
-                  {activePhase >= 3 && viewMode === 'BURNED' && redactionResult && (
+                  {stage >= 3 && viewMode === 'BURNED' && redactionResult && (
                     <img
                       src={redactionResult.flattenedPngDataUrl}
                       alt="Physically Burned and Flattened Document Raster"
@@ -1227,7 +944,7 @@ export function App() {
 
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.74rem', fontFamily: 'var(--font-mono)', color: 'var(--fg-muted)' }}>
                 <span>
-                  Spatial State: {activePhase >= 3 && viewMode === 'BURNED' ? 'Flattened Non-Extractable Raster' : (ocrTelemetry ? ocrTelemetry.engineName : 'Native Canvas')}
+                  Spatial State: {stage >= 3 && viewMode === 'BURNED' ? 'Flattened Non-Extractable Raster' : (ocrTelemetry ? ocrTelemetry.engineName : 'Native Canvas')}
                 </span>
                 <span>Isolated RAM: Active</span>
               </div>
@@ -1237,60 +954,22 @@ export function App() {
             <div className="neu-card" style={{ width: '100%', padding: '22px', gap: '16px' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <ShieldCheck size={18} style={{ color: activePhase === 5 ? 'var(--accent-secondary)' : 'var(--accent)' }} />
+                  <ShieldCheck size={18} style={{ color: stage === 5 ? 'var(--accent-secondary)' : 'var(--accent)' }} />
                   <span style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: '0.96rem' }}>
-                    {activePhase === 1 && 'Phase 1 Cryptographic Telemetry'}
-                    {activePhase === 2 && 'Phase 2 OCR Spatial Telemetry'}
-                    {activePhase === 3 && 'Phase 3 Redaction Sanitization Audit'}
-                    {activePhase === 4 && 'Phase 4 Zero-Knowledge Prover Telemetry'}
-                    {activePhase === 5 && 'Phase 5 Master Audit Seal & Verification'}
+                    {STAGE_CONFIG[stage].telemetryTitle}
                   </span>
                 </div>
-                <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-                  <button
-                    className={`neu-pill-btn ${activePhase === 1 ? 'active' : ''}`}
-                    style={{ fontSize: '0.7rem', padding: '4px 8px' }}
-                    onClick={() => setActivePhase(1)}
-                  >
-                    1. Ingest
-                  </button>
-                  <button
-                    className={`neu-pill-btn ${activePhase === 2 ? 'active' : ''}`}
-                    style={{ fontSize: '0.7rem', padding: '4px 8px' }}
-                    onClick={() => doc && setActivePhase(2)}
-                    disabled={!doc}
-                  >
-                    2. OCR
-                  </button>
-                  <button
-                    className={`neu-pill-btn ${activePhase === 3 ? 'active' : ''}`}
-                    style={{ fontSize: '0.7rem', padding: '4px 8px' }}
-                    onClick={() => redactionResult && setActivePhase(3)}
-                    disabled={!redactionResult}
-                  >
-                    3. Burn
-                  </button>
-                  <button
-                    className={`neu-pill-btn ${activePhase === 4 ? 'active' : ''}`}
-                    style={{ fontSize: '0.7rem', padding: '4px 8px' }}
-                    onClick={() => (proofResult || redactionResult) && setActivePhase(4)}
-                    disabled={!redactionResult}
-                  >
-                    4. ZK Prover
-                  </button>
-                  <button
-                    className={`neu-pill-btn ${activePhase === 5 ? 'active' : ''}`}
-                    style={{ fontSize: '0.7rem', padding: '4px 8px' }}
-                    onClick={() => (masterSeal || proofResult) && setActivePhase(5)}
-                    disabled={!proofResult}
-                  >
-                    5. Seal
-                  </button>
-                </div>
+                <span className="neu-hash-pill" style={{ color: stage === 5 ? 'var(--accent-secondary)' : 'var(--accent)', fontWeight: 700 }}>
+                  {stage === 1 && 'H(Doc) ANCHOR'}
+                  {stage === 2 && `${detectedFields.length} ZONES DETECTED`}
+                  {stage === 3 && 'ZERO-STREAM PURGE'}
+                  {stage === 4 && (proofVerified ? 'SOUNDNESS CONFIRMED' : 'CIRCUIT READY')}
+                  {stage === 5 && (masterSeal ? 'QUAD-FACTOR SEALED' : 'AWAITING BINDING')}
+                </span>
               </div>
 
-              {/* PHASE 1 VIEW IN TELEMETRY */}
-              {activePhase === 1 && (
+              {/* STAGE 1 VIEW IN TELEMETRY */}
+              {stage === 1 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
                   {/* Preimage SHA-256 Digest Card */}
                   <div className="neu-well" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
@@ -1435,19 +1114,19 @@ export function App() {
                   {doc && (
                     <button
                       className="neu-btn-primary"
-                      onClick={() => setActivePhase(2)}
+                      onClick={() => setStage(2)}
                       disabled={ocrRunning}
                       style={{ width: '100%', padding: '12px', fontSize: '0.88rem', gap: '8px' }}
                     >
-                      <span>Proceed to Phase 2: OCR Coordinate Detection</span>
+                      <span>Proceed to Stage 2: OCR Coordinate Detection</span>
                       <ArrowRight size={16} />
                     </button>
                   )}
                 </div>
               )}
 
-              {/* PHASE 2 VIEW IN TELEMETRY */}
-              {activePhase === 2 && (
+              {/* STAGE 2 VIEW IN TELEMETRY */}
+              {stage === 2 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
                   {/* Real Telemetry Bar */}
                   {ocrTelemetry && (
@@ -1599,7 +1278,7 @@ export function App() {
                     )}
                   </div>
 
-                  {/* Phase 2 Primary CTA: Burn Pixels & Proceed to Phase 3 */}
+                  {/* Stage 2 Primary CTA: Burn Pixels & Proceed to Stage 3 */}
                   <button
                     className="neu-btn-primary"
                     onClick={executePixelBurn}
@@ -1607,14 +1286,14 @@ export function App() {
                     style={{ width: '100%', padding: '12px', fontSize: '0.88rem', gap: '8px' }}
                   >
                     <Flame size={16} />
-                    <span>{isBurning ? 'Burning Pixels & Stripping Streams...' : 'Execute Phase 3: Physical Pixel Burn & Flatten'}</span>
+                    <span>{isBurning ? 'Burning Pixels & Stripping Streams...' : 'Execute Stage 3: Physical Pixel Burn & Flatten'}</span>
                     <ArrowRight size={16} />
                   </button>
                 </div>
               )}
 
-              {/* PHASE 3 VIEW IN TELEMETRY */}
-              {activePhase === 3 && redactionResult && (
+              {/* STAGE 3 VIEW IN TELEMETRY */}
+              {stage === 3 && redactionResult && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
                   {/* Redacted SHA-256 Preimage H(Doc_Redacted) */}
                   <div className="neu-well" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
@@ -1710,7 +1389,7 @@ export function App() {
                       style={{ width: '100%', padding: '12px', fontSize: '0.88rem', gap: '8px' }}
                     >
                       <Cpu size={16} className={isProving ? 'spin' : ''} />
-                      <span>{isProving ? 'Compiling In-Browser Groth16 Proof...' : 'Proceed to Phase 4: ZK Prover Engine'}</span>
+                      <span>{isProving ? 'Compiling In-Browser Groth16 Proof...' : 'Proceed to Stage 4: Groth16 ZK Prover Engine'}</span>
                       <ArrowRight size={16} />
                     </button>
 
@@ -1726,8 +1405,8 @@ export function App() {
                 </div>
               )}
 
-              {/* PHASE 4 VIEW IN TELEMETRY */}
-              {activePhase === 4 && (
+              {/* STAGE 4 VIEW IN TELEMETRY */}
+              {stage === 4 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
                   {/* Invalidation Notice Card */}
                   {invalidationMessage && (
@@ -1958,7 +1637,7 @@ export function App() {
                           style={{ width: '100%', padding: '13px', fontSize: '0.88rem', gap: '8px' }}
                         >
                           <Fingerprint size={16} className={isSealing ? 'spin' : ''} />
-                          <span>{isSealing ? 'Welding Cryptographic Factors...' : 'Execute Phase 5: Master Audit Seal & Package'}</span>
+                          <span>{isSealing ? 'Welding Cryptographic Factors...' : 'Execute Stage 5: Master Audit Seal & Package'}</span>
                           <ArrowRight size={16} />
                         </button>
 
@@ -1991,8 +1670,8 @@ export function App() {
                 </div>
               )}
 
-              {/* PHASE 5 VIEW IN TELEMETRY */}
-              {activePhase === 5 && (
+              {/* STAGE 5 VIEW IN TELEMETRY */}
+              {stage === 5 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
                   {/* Master Audit Seal Hash */}
                   <div className="neu-well" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
@@ -2151,7 +1830,7 @@ export function App() {
                     {auditPackage && (
                       <button
                         className="neu-btn-primary"
-                        onClick={() => setMainView('VERIFIER')}
+                        onClick={() => setStage(6)}
                         style={{
                           width: '100%',
                           padding: '13px',
@@ -2163,7 +1842,7 @@ export function App() {
                         }}
                       >
                         <ShieldCheck size={16} />
-                        <span>Launch Standalone Enterprise Verifier Portal (Layer 6) →</span>
+                        <span>Proceed to Stage 6: Enterprise Verifier Portal →</span>
                       </button>
                     )}
                   </div>
@@ -2171,25 +1850,28 @@ export function App() {
               )}
             </div>
           </div>
-          </>
         )}
 
-        {/* Layer 6: Standalone Enterprise Verifier Portal */}
-        {mainView === 'VERIFIER' && (
+        {/* Stage 6: Standalone Enterprise Verifier Portal */}
+        {stage === 6 && (
           <VerifierPortalView
             initialPackage={auditPackage}
-            onNavigateToStudio={() => setMainView('STUDIO')}
+            onNavigateToStage={(s) => setStage(s as StageNumber)}
           />
         )}
 
-        {/* Layer 7: Hardware Enclave & TPM 2.0 (Scaffolded Blank Page) */}
-        {mainView === 'ENCLAVE' && (
-          <HardwareEnclaveView onBackToStudio={() => setMainView('STUDIO')} />
+        {/* Stage 7: Hardware Enclave & TPM 2.0 (Scaffolded Blank Page) */}
+        {stage === 7 && (
+          <HardwareEnclaveView
+            onNavigateToStage={(s) => setStage(s as StageNumber)}
+          />
         )}
 
-        {/* Layer 8: Web-to-Desktop Transport Protocol (Scaffolded Blank Page) */}
-        {mainView === 'TRANSPORT' && (
-          <TransportProtocolView onBackToStudio={() => setMainView('STUDIO')} />
+        {/* Stage 8: Web-to-Desktop Transport Protocol (Scaffolded Blank Page) */}
+        {stage === 8 && (
+          <TransportProtocolView
+            onNavigateToStage={(s) => setStage(s as StageNumber)}
+          />
         )}
         </div>
       </main>
