@@ -334,3 +334,75 @@ export async function createRedactedPdf(
 
   return await pdfDoc.save();
 }
+
+// 7. Human-friendly 8-byte Chunked Hash Formatter
+export function formatChunkedHash(hashHex: string): string {
+  return hashHex.match(/.{1,8}/g)?.join(' ') || hashHex;
+}
+
+// 8. PDF Page 1 Canvas Renderer via pdfjs-dist
+export async function renderPdfBytesToCanvas(
+  fileBytes: Uint8Array,
+  canvas: HTMLCanvasElement
+): Promise<{ numPages: number; text: string; width: number; height: number }> {
+  // @ts-expect-error pdfjs-dist ESM build lack of separate d.ts
+  const pdfjs = await import('pdfjs-dist/build/pdf.mjs');
+  pdfjs.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
+
+  const loadingTask = pdfjs.getDocument({ data: fileBytes });
+  const pdf = await loadingTask.promise;
+  const page = await pdf.getPage(1);
+
+  const desiredWidth = 640;
+  const unscaledViewport = page.getViewport({ scale: 1 });
+  const scale = desiredWidth / unscaledViewport.width;
+  const viewport = page.getViewport({ scale });
+
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    await (page.render({ canvasContext: ctx, viewport } as any) as any).promise;
+  }
+
+  let text = '';
+  try {
+    const textContent = await page.getTextContent();
+    text = textContent.items
+      .map((item: any) => item.str || '')
+      .join(' ');
+  } catch (err) {
+    console.warn('Text extraction notice:', err);
+  }
+
+  return { numPages: pdf.numPages, text, width: viewport.width, height: viewport.height };
+}
+
+// 9. Image File Canvas Renderer
+export async function renderImageFileToCanvas(
+  file: File,
+  canvas: HTMLCanvasElement
+): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      const targetWidth = 640;
+      const scale = targetWidth / img.naturalWidth;
+      const targetHeight = Math.round(img.naturalHeight * scale);
+
+      canvas.width = targetWidth;
+      canvas.height = targetHeight;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+      }
+      URL.revokeObjectURL(url);
+      resolve({ width: targetWidth, height: targetHeight });
+    };
+    img.onerror = reject;
+    img.src = url;
+  });
+}
+

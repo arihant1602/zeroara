@@ -1,6 +1,6 @@
 import React from 'react';
-import { StepNumber, PipelineState, NetworkListener } from '../hooks/usePipeline';
-import { Check, Loader2, WifiOff, FileText, Scan, Flame, Key, Stamp } from 'lucide-react';
+import { StepNumber, PipelineState, NetworkListener, EnterprisePolicy } from '../hooks/usePipeline';
+import { Check, Loader2, WifiOff, FileText, Scan, Flame, Key, Stamp, Sliders } from 'lucide-react';
 
 interface PipelineStepperProps {
   pipelineState: PipelineState;
@@ -10,6 +10,8 @@ interface PipelineStepperProps {
   networkActivity: NetworkListener;
   onLoadSample: () => void;
   onReset: () => void;
+  enterprisePolicy: EnterprisePolicy;
+  onOpenEnterpriseModal: () => void;
 }
 
 interface StepMeta {
@@ -27,6 +29,8 @@ export const PipelineStepper: React.FC<PipelineStepperProps> = ({
   networkActivity,
   onLoadSample,
   onReset,
+  enterprisePolicy,
+  onOpenEnterpriseModal,
 }) => {
   const steps: StepMeta[] = [
     { num: 1, label: '1. Ingest', sublabel: 'SHA-256 Digest', icon: <FileText size={16} /> },
@@ -51,7 +55,7 @@ export const PipelineStepper: React.FC<PipelineStepperProps> = ({
           gap: '14px',
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
           <img
             src="/logo.png"
             alt="Zeroara Logo"
@@ -67,6 +71,26 @@ export const PipelineStepper: React.FC<PipelineStepperProps> = ({
             ZEROARA
           </div>
           <span className="brand-tag">PROVABLE REDACTION ENGINE</span>
+
+          {/* Enterprise Policy Pill */}
+          <button
+            type="button"
+            className="neu-pill-btn"
+            style={{
+              fontSize: '0.74rem',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              color: 'var(--accent)',
+              fontWeight: 700,
+            }}
+            onClick={onOpenEnterpriseModal}
+            title="Configure Enterprise Verification Requirement"
+          >
+            <Sliders size={13} />
+            <span>ENTERPRISE SPEC: &gt;= ${enterprisePolicy.thresholdValue.toLocaleString()} {enterprisePolicy.currency}</span>
+          </button>
+
           <div
             style={{
               display: 'flex',
