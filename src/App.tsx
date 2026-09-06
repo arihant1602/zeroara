@@ -95,6 +95,8 @@ export function App() {
     { label: 'Mortgage Solvency ($80k)', req: 'First Horizon Underwriting', field: 'Qualifying Annual Income', amount: 80000 },
   ];
 
+  const cleanCanvasDataRef = useRef<ImageData | null>(null);
+
   // Core Document Extraction Pipeline running on mounted canvas
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -121,6 +123,12 @@ export function App() {
         }
 
         if (isCancelled) return;
+
+        // Cache the pristine rendered document raster for instant non-destructive HUD overlays
+        const ctx = canvas.getContext('2d');
+        if (ctx && canvas.width > 0 && canvas.height > 0) {
+          cleanCanvasDataRef.current = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        }
 
         const classified = classifyExtractedTargets(tokens, enterpriseSpec.thresholdValue);
         const elapsed = Math.max(1, Math.round(performance.now() - start));
@@ -156,27 +164,24 @@ export function App() {
     return () => {
       isCancelled = true;
     };
-  }, [doc, enterpriseSpec.thresholdValue]);
+  }, [doc]);
 
-  // Redraw overlays on phase or selection changes
+  // Synchronous blit & redraw overlays whenever Phase, HUD toggle, or target selection changes
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || !doc || !doc.rawBytes || detectedFields.length === 0) return;
+    if (!canvas || !cleanCanvasDataRef.current) return;
 
-    const redraw = async () => {
-      if (doc.mimeType === 'application/pdf') {
-        await extractPdfSpatialItems(doc.rawBytes!, canvas);
-      } else if (doc.fileObj && doc.mimeType.startsWith('image/')) {
-        await renderImageFileToCanvas(doc.fileObj, canvas);
-      }
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
 
-      if (activePhase === 2 && showHudOverlays) {
-        drawBoundingBoxOverlays(canvas, detectedFields, selectedFieldId);
-      }
-    };
+    // Restore pristine document raster
+    ctx.putImageData(cleanCanvasDataRef.current, 0, 0);
 
-    redraw();
-  }, [activePhase, showHudOverlays, selectedFieldId]);
+    // Draw active bounding box overlays
+    if (activePhase === 2 && showHudOverlays && detectedFields.length > 0) {
+      drawBoundingBoxOverlays(canvas, detectedFields, selectedFieldId);
+    }
+  }, [activePhase, showHudOverlays, selectedFieldId, detectedFields]);
 
   // Ingest uploaded user document
   const handleFileUpload = async (file: File) => {
