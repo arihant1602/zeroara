@@ -1,11 +1,11 @@
-import { useState, useRef, useEffect, type MouseEvent } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import './App.css';
 import {
   sha256Hex,
   formatChunkedHash,
   generateSamplePdfBytes,
   extractDocumentSpatial,
-  classifyExtractedTargets,
+  classifyForScenario,
   createFlattenedRedactedPdf,
   downloadFile,
   generateIncomeThresholdProof,
@@ -30,7 +30,9 @@ import {
   ShieldCheck,
   WifiOff,
   CheckCircle2,
+  Crosshair,
   ArrowLeft,
+  ArrowRight,
   Plus,
   Trash2,
   SlidersHorizontal,
@@ -41,6 +43,7 @@ import {
   EyeOff,
   Lock,
   Cpu,
+  Fingerprint,
   AlertTriangle,
   Binary,
 } from 'lucide-react';
@@ -49,6 +52,7 @@ import {
   HardwareEnclaveView,
   TransportProtocolView,
 } from './layers';
+import { SCENARIOS, getScenario, isProofBacked } from './core/scenarios';
 
 export interface IngestedDoc {
   fileName: string;
@@ -63,13 +67,15 @@ export interface IngestedDoc {
 }
 
 export interface EnterpriseSpec {
+  documentCategory: string; // scenario id (e.g. 'aadhaar', 'salary_slip')
   requesterName: string;
   purpose: string;
   targetField: string;
   predicate: string;
   thresholdValue: number;
-  currency: string;
+  currency: string; // currency / unit; '' for non-numeric scenarios
   challengeNonce: string;
+  requiredRedactionFields: string[];
 }
 
 export interface OcrTelemetrySummary {
@@ -89,8 +95,8 @@ export const STAGE_CONFIG: Record<StageNumber, { title: string; subtitle: string
   },
   2: {
     title: 'Spatial OCR & Target Geometry Extraction',
-    subtitle: 'Hover OCR text on the document and click it to select what should be hidden.',
-    telemetryTitle: 'Stage 2: Select Text to Hide',
+    subtitle: 'Parses exact pixel coordinates [x, y, w, h] to classify sensitive PII zones and witness targets.',
+    telemetryTitle: 'Stage 2: OCR Spatial Geometry Telemetry',
   },
   3: {
     title: 'Physical Pixel Burning & Stream Stripping',
@@ -136,8 +142,6 @@ export function App() {
   const [selectedFieldId, setSelectedFieldId] = useState<string | null>(null);
   const [showHudOverlays, setShowHudOverlays] = useState(true);
   const [showAllTokens, setShowAllTokens] = useState(false);
-  const [stage2SearchQuery, setStage2SearchQuery] = useState('');
-  const [hoveredTokenId, setHoveredTokenId] = useState<string | null>(null);
 
   // Phase 3 Burning & Flattening State
   const [isBurning, setIsBurning] = useState(false);
@@ -175,22 +179,48 @@ export function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const cleanCanvasDataRef = useRef<ImageData | null>(null);
 
-  // Enterprise Verification Spec State
+  // Document scenario + enterprise/verifier spec state
+  const INITIAL_SCENARIO = getScenario('income_accredited');
   const [enterpriseSpec, setEnterpriseSpec] = useState<EnterpriseSpec>({
-    requesterName: 'Apex Distributed Ventures LP',
-    purpose: 'SEC Rule 506(c) Accredited Investor Verification',
-    targetField: '2-Year Trailing Net Income',
-    predicate: '>= (Greater than or equal to)',
-    thresholdValue: 100000,
-    currency: 'USD',
+    documentCategory: INITIAL_SCENARIO.id,
+    requesterName: INITIAL_SCENARIO.defaults.requesterName,
+    purpose: INITIAL_SCENARIO.defaults.purpose,
+    targetField: INITIAL_SCENARIO.fields.find((f) => f.isWitness)?.label ?? INITIAL_SCENARIO.fields[0].label,
+    predicate: INITIAL_SCENARIO.defaults.predicate,
+    thresholdValue: INITIAL_SCENARIO.defaults.thresholdValue,
+    currency: INITIAL_SCENARIO.defaults.unit,
     challengeNonce: '0x94f8a2bc710e39b4d1c68f12a03',
+    requiredRedactionFields: INITIAL_SCENARIO.fields.map((f) => f.label),
   });
 
-  const presets = [
-    { label: 'SEC 506(c) ($100k)', req: 'Apex Distributed Ventures LP', field: '2-Year Trailing Net Income', amount: 100000 },
-    { label: 'Senior Salary ($150k)', req: 'Orbital Cybernetics Corp', field: 'Base Annual Salary', amount: 150000 },
-    { label: 'Mortgage Solvency ($80k)', req: 'First Horizon Underwriting', field: 'Qualifying Annual Income', amount: 80000 },
-  ];
+  // Derived: the active scenario and whether it can drive a numeric ZK predicate.
+  const scenario = getScenario(enterpriseSpec.documentCategory);
+  const scenarioProofBacked = isProofBacked(scenario);
+
+  // Switch the active document scenario: reset the verifier spec to the
+  // scenario's defaults and re-rank OCR targets for the new field set.
+  const applyScenario = (scenarioId: string) => {
+    const next = getScenario(scenarioId);
+    setEnterpriseSpec((prev) => ({
+      ...prev,
+      documentCategory: next.id,
+      requesterName: next.defaults.requesterName,
+      purpose: next.defaults.purpose,
+      targetField: next.fields.find((f) => f.isWitness)?.label ?? next.fields[0].label,
+      predicate: next.defaults.predicate,
+      thresholdValue: next.defaults.thresholdValue,
+      currency: next.defaults.unit,
+      requiredRedactionFields: next.fields.map((f) => f.label),
+    }));
+    if (extractedTokens.length > 0) {
+      const targets = classifyForScenario(extractedTokens, next, {
+        thresholdValue: next.defaults.thresholdValue,
+      });
+      setDetectedFields(targets);
+      setSelectedFieldId(targets[0]?.id ?? null);
+    }
+    invalidateDownstreamState('Scenario changed — re-run redaction, proof, and seal.');
+  };
 
   // Core Document Extraction Pipeline running on mounted canvas
   useEffect(() => {
@@ -209,7 +239,9 @@ export function App() {
         const result = await extractDocumentSpatial(
           doc,
           canvas,
-          enterpriseSpec.thresholdValue
+          enterpriseSpec.thresholdValue,
+          undefined,
+          enterpriseSpec.documentCategory
         );
 
         if (isCancelled) return;
@@ -265,13 +297,10 @@ export function App() {
     ctx.putImageData(cleanCanvasDataRef.current, 0, 0);
 
     // Draw active bounding box overlays if in Stage 2
-    if (stage === 2 && showHudOverlays) {
-      if (detectedFields.length > 0) {
-        drawBoundingBoxOverlays(canvas, detectedFields, selectedFieldId);
-      }
-      drawTokenHoverOverlay(canvas, extractedTokens, hoveredTokenId);
+    if (stage === 2 && showHudOverlays && detectedFields.length > 0) {
+      drawBoundingBoxOverlays(canvas, detectedFields, selectedFieldId);
     }
-  }, [stage, showHudOverlays, selectedFieldId, detectedFields, extractedTokens, hoveredTokenId]);
+  }, [stage, showHudOverlays, selectedFieldId, detectedFields]);
 
   // Execute Stage 3: Physical Pixel Burning & Text Stream Stripping
   const executePixelBurn = async () => {
@@ -317,16 +346,30 @@ export function App() {
     setProverError(null);
     setInvalidationMessage(null);
 
-    const witness =
-      detectedFields.find((f) => f.action === 'PROVE_AND_BURN') ||
-      detectedFields.find((f) => typeof f.numericValue === 'number') ||
-      detectedFields[0];
-    const actualVal = witness?.numericValue || 145000;
+    const witness = detectedFields.find(
+      (f) => f.action === 'PROVE_AND_BURN' && typeof f.numericValue === 'number'
+    );
+
+    // Seal-only scenarios (identity docs) or documents with no numeric witness
+    // do NOT receive a fabricated proof. Redaction is bound into the master
+    // seal only; the ZK stage is skipped honestly.
+    if (!scenarioProofBacked || !witness) {
+      setProofResult(null);
+      setProofVerified(null);
+      setProofVerifyLatencyMs(null);
+      setInvalidationMessage(
+        scenarioProofBacked
+          ? 'No numeric witness detected — proceeding seal-only (no ZK predicate proof generated).'
+          : `${scenario.label} is a seal-only document category — redaction is sealed without a numeric predicate proof.`
+      );
+      setStage(4);
+      return;
+    }
 
     setIsProving(true);
     try {
       const sessionCtx: SessionContext = {
-        documentDigest: doc?.hashHex || '0x0000000000000000000000000000000000000000000000000000000000000000',
+        documentDigest: doc?.hashHex || '0x' + '0'.repeat(64),
         requesterName: enterpriseSpec.requesterName,
         purpose: enterpriseSpec.purpose,
         thresholdValue: enterpriseSpec.thresholdValue,
@@ -334,7 +377,7 @@ export function App() {
       };
 
       const res = await generateIncomeThresholdProof(
-        actualVal,
+        witness.numericValue as number,
         enterpriseSpec.thresholdValue,
         sessionCtx
       );
@@ -369,28 +412,30 @@ export function App() {
 
   // Execute Phase 5: Generate Quad-Factor Master Audit Seal & Self-Contained Package
   const executeMasterSeal = async () => {
-    if (!redactionResult || !proofResult || !doc) return;
+    if (!redactionResult || !doc) return;
 
     setIsSealing(true);
     try {
+      // DETECT_ONLY fields are flagged but not burned, so they are not bound
+      // into the geometry of the seal.
+      const burnedTargets = detectedFields.filter((f) => f.action !== 'DETECT_ONLY');
+
       const seal = await computeMasterAuditSeal(
         redactionResult.redactedHashHex,
-        detectedFields,
-        proofResult.commitment,
-        proofResult.proof
+        burnedTargets,
+        proofResult?.commitment ?? '',
+        proofResult?.proof ?? null
       );
       setMasterSeal(seal);
+
+      const redactionMode: 'PROOF_BACKED' | 'SEAL_ONLY' = proofResult ? 'PROOF_BACKED' : 'SEAL_ONLY';
 
       const pkg: ZeroaraAuditPackage = {
         protocol: 'Zeroara Provable Redaction Protocol',
         version: '1.0.0',
         generatedAt: new Date().toISOString(),
-        scenario: {
-          id: 'salary_slip',
-          label: 'Salary Slip',
-          category: 'Financial Document',
-        },
-        redactionMode: 'PROOF_BACKED',
+        scenario: { id: scenario.id, label: scenario.label, category: scenario.category },
+        redactionMode,
         sourceDocument: {
           fileName: doc.fileName,
           fileSizeBytes: doc.fileSizeBytes,
@@ -400,7 +445,7 @@ export function App() {
         sanitizedDocument: {
           fileSizeBytes: redactionResult.fileSizeBytes,
           preimageSha256: redactionResult.redactedHashHex,
-          burnedBoundingBoxes: detectedFields.map((f) => ({
+          burnedBoundingBoxes: burnedTargets.map((f) => ({
             id: f.id,
             label: f.label,
             x: f.x,
@@ -411,33 +456,38 @@ export function App() {
           })),
           textStreamsDetected: redactionResult.textStreamCount,
         },
-        redactedFields: detectedFields.map((field) => ({
-          label: field.label,
-          classification: field.classification,
-          action: field.action,
+        redactedFields: detectedFields.map((f) => ({
+          label: f.label,
+          classification: f.classification,
+          action: f.action,
+          fieldKey: f.fieldKey,
         })),
         enterpriseRequirement: {
           requesterName: enterpriseSpec.requesterName,
           purpose: enterpriseSpec.purpose,
-          documentCategory: 'Salary Slip',
+          documentCategory: scenario.label,
           targetField: enterpriseSpec.targetField,
           predicate: enterpriseSpec.predicate,
           thresholdValue: enterpriseSpec.thresholdValue,
           currency: enterpriseSpec.currency,
           challengeNonce: enterpriseSpec.challengeNonce,
-          requiredRedactionFields: detectedFields.map((field) => field.label),
+          requiredRedactionFields: enterpriseSpec.requiredRedactionFields,
         },
-        zeroKnowledgeProof: {
-          curve: proofResult.proof.curve,
-          protocol: proofResult.proof.protocol,
-          publicSignals: proofResult.publicSignals,
-          proof: proofResult.proof,
-          poseidonCommitment: proofResult.commitment,
-          blindingSalt: proofResult.blindingSalt,
-          sessionBinding: proofResult.sessionBinding,
-          verified: proofVerified ?? true,
-          verificationLatencyMs: proofVerifyLatencyMs ?? 25,
-        },
+        ...(proofResult
+          ? {
+              zeroKnowledgeProof: {
+                curve: proofResult.proof.curve,
+                protocol: proofResult.proof.protocol,
+                publicSignals: proofResult.publicSignals,
+                proof: proofResult.proof,
+                poseidonCommitment: proofResult.commitment,
+                blindingSalt: proofResult.blindingSalt,
+                sessionBinding: proofResult.sessionBinding,
+                verified: proofVerified ?? true,
+                verificationLatencyMs: proofVerifyLatencyMs ?? 25,
+              },
+            }
+          : {}),
         masterAuditSeal: seal,
       };
 
@@ -581,111 +631,32 @@ export function App() {
       const mainColor = isWitness ? '#EA580C' : '#0D9488';
 
       ctx.save();
+      // Bounding box fill
+      ctx.fillStyle = isWitness ? 'rgba(234, 88, 12, 0.14)' : 'rgba(13, 148, 136, 0.14)';
+      ctx.fillRect(field.x, field.y, field.width, field.height);
 
-      // 1. Shading / Redaction Mask
-      if (isWitness) {
-        // Witness: Warm orange tint indicating confidential attestation
-        ctx.fillStyle = isSelected ? 'rgba(234, 88, 12, 0.28)' : 'rgba(234, 88, 12, 0.16)';
-        ctx.fillRect(field.x, field.y, field.width, field.height);
-      } else {
-        // Direct Redaction: Clear dark mask showing it is marked for black-out / hiding
-        ctx.fillStyle = isSelected ? 'rgba(15, 23, 42, 0.52)' : 'rgba(15, 23, 42, 0.36)';
-        ctx.fillRect(field.x, field.y, field.width, field.height);
-      }
-
-      // 2. Crisp Bounding Box Stroke
-      ctx.strokeStyle = isSelected ? '#EA580C' : mainColor;
+      // Bounding box stroke
+      ctx.strokeStyle = mainColor;
       ctx.lineWidth = isSelected ? 2.5 : 1.5;
-      if (isSelected) {
-        ctx.setLineDash([]);
-      } else {
-        ctx.setLineDash(isWitness ? [] : [4, 3]);
-      }
+      ctx.setLineDash(isSelected ? [] : [4, 3]);
       ctx.strokeRect(field.x, field.y, field.width, field.height);
 
-      // 3. Solid legible Pill Badge over canvas
+      // Spatial HUD Tag Badge
       ctx.setLineDash([]);
-      const badgeText = isWitness ? `ZK WITNESS: ${field.extractedValue}` : `HIDDEN: ${field.extractedValue}`;
-      ctx.font = 'bold 9px "JetBrains Mono", monospace';
-      const textWidth = ctx.measureText(badgeText).width;
-      const badgeHeight = 14;
-      const badgeY = field.y > 16 ? field.y - badgeHeight - 3 : field.y + field.height + 4;
-      const badgeX = Math.max(2, field.x);
-
-      // Solid background so text is readable over any document contents
-      ctx.fillStyle = isSelected ? '#EA580C' : (isWitness ? '#EA580C' : '#1E293B');
-      ctx.beginPath();
-      if (ctx.roundRect) {
-        ctx.roundRect(badgeX, badgeY, textWidth + 10, badgeHeight, 3);
-      } else {
-        ctx.rect(badgeX, badgeY, textWidth + 10, badgeHeight);
-      }
-      ctx.fill();
-
-      // Badge text in clean white
-      ctx.fillStyle = '#FFFFFF';
-      ctx.fillText(badgeText, badgeX + 5, badgeY + 10.5);
+      ctx.fillStyle = mainColor;
+      ctx.font = 'bold 8.5px "JetBrains Mono", monospace';
+      const tagPrefix = isWitness ? 'WITNESS CLAIM' : 'PII IDENTIFIER';
+      const badgeText = `${tagPrefix} [x:${field.x}, y:${field.y}, w:${field.width}, h:${field.height}]`;
+      
+      const badgeY = field.y > 14 ? field.y - 4 : field.y + field.height + 10;
+      ctx.fillText(badgeText, field.x, badgeY);
 
       ctx.restore();
     });
   };
 
-  const drawTokenHoverOverlay = (
-    canvas: HTMLCanvasElement,
-    tokens: ExtractedSpatialToken[],
-    tokenId: string | null
-  ) => {
-    if (!tokenId) return;
-
-    const token = tokens.find((item) => item.id === tokenId);
-    const ctx = canvas.getContext('2d');
-    if (!token || !ctx) return;
-
-    ctx.save();
-    ctx.fillStyle = 'rgba(13, 148, 136, 0.22)';
-    ctx.fillRect(token.x - 2, token.y - 2, token.width + 4, token.height + 4);
-    ctx.strokeStyle = '#0D9488';
-    ctx.lineWidth = 2;
-    ctx.setLineDash([3, 2]);
-    ctx.strokeRect(token.x - 2, token.y - 2, token.width + 4, token.height + 4);
-    ctx.restore();
-  };
-
-  const getCanvasTokenAtPointer = (
-    event: MouseEvent<HTMLCanvasElement>
-  ): ExtractedSpatialToken | null => {
-    const canvas = canvasRef.current;
-    if (!canvas) return null;
-
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
-    const x = (event.clientX - rect.left) * scaleX;
-    const y = (event.clientY - rect.top) * scaleY;
-
-    return extractedTokens.find(
-      (token) =>
-        x >= token.x - 3 &&
-        x <= token.x + token.width + 3 &&
-        y >= token.y - 3 &&
-        y <= token.y + token.height + 3
-    ) || null;
-  };
-
   // Add a specific token as a redaction target
   const handleAddTokenAsTarget = (token: ExtractedSpatialToken) => {
-    const existingTarget = detectedFields.find(
-      (field) =>
-        field.extractedValue === token.text &&
-        Math.abs(field.x - token.x) < 4 &&
-        Math.abs(field.y - token.y) < 4
-    );
-
-    if (existingTarget) {
-      setSelectedFieldId(existingTarget.id);
-      return;
-    }
-
     const newTarget: ClassifiedTarget = {
       id: `manual_${Date.now()}`,
       label: `Redaction Zone: "${token.text.slice(0, 16)}"`,
@@ -868,7 +839,8 @@ export function App() {
                       stage === 8
                     }
                   >
-                    <span>Next →</span>
+                    <span>Next</span>
+                    <ArrowRight size={13} />
                   </button>
                 </div>
               </div>
@@ -888,7 +860,7 @@ export function App() {
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: 'minmax(0, 65fr) minmax(0, 35fr)',
+              gridTemplateColumns: 'minmax(0, 1.15fr) minmax(0, 1fr)',
               gap: '20px',
               alignItems: 'stretch',
             }}
@@ -899,7 +871,7 @@ export function App() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <FileText size={18} style={{ color: 'var(--accent)' }} />
                   <span style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: '0.96rem' }}>
-                    {stage === 2 ? 'Select Text to Hide' : 'Document Viewport'}
+                    Document Viewport
                   </span>
                 </div>
                 {doc && (
@@ -1017,45 +989,12 @@ export function App() {
                 >
                   <canvas
                     ref={canvasRef}
-                    onMouseMove={(e) => {
-                      if (stage !== 2) return;
-                      const token = getCanvasTokenAtPointer(e);
-                      setHoveredTokenId((currentId) => token?.id || (currentId ? null : currentId));
-                    }}
-                    onMouseLeave={() => setHoveredTokenId(null)}
-                    onClick={(e) => {
-                      if (stage !== 2) return;
-                      const token = getCanvasTokenAtPointer(e);
-                      if (token) {
-                        handleAddTokenAsTarget(token);
-                        return;
-                      }
-
-                      const canvas = canvasRef.current;
-                      if (!canvas) return;
-                      const rect = canvas.getBoundingClientRect();
-                      const scaleX = canvas.width / rect.width;
-                      const scaleY = canvas.height / rect.height;
-                      const clickX = (e.clientX - rect.left) * scaleX;
-                      const clickY = (e.clientY - rect.top) * scaleY;
-                      const hit = detectedFields.find(
-                        (f) =>
-                          clickX >= f.x - 5 &&
-                          clickX <= f.x + f.width + 5 &&
-                          clickY >= f.y - 18 &&
-                          clickY <= f.y + f.height + 6
-                      );
-                      if (hit) {
-                        setSelectedFieldId(hit.id);
-                      }
-                    }}
                     style={{
                       maxWidth: '100%',
                       height: 'auto',
                       borderRadius: '12px',
                       boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
                       display: (stage >= 3 && viewMode === 'BURNED' && redactionResult) ? 'none' : 'block',
-                      cursor: stage === 2 ? 'crosshair' : 'default',
                     }}
                   />
                   {stage >= 3 && viewMode === 'BURNED' && redactionResult && (
@@ -1070,9 +1009,7 @@ export function App() {
 
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.74rem', fontFamily: 'var(--font-mono)', color: 'var(--fg-muted)' }}>
                 <span>
-                  {stage === 2
-                    ? (hoveredTokenId ? 'OCR text found: click to select' : 'Hover OCR text to select it')
-                    : `Spatial State: ${stage >= 3 && viewMode === 'BURNED' ? 'Flattened Non-Extractable Raster' : (ocrTelemetry ? ocrTelemetry.engineName : 'Native Canvas')}`}
+                  Spatial State: {stage >= 3 && viewMode === 'BURNED' ? 'Flattened Non-Extractable Raster' : (ocrTelemetry ? ocrTelemetry.engineName : 'Native Canvas')}
                 </span>
                 <span>Isolated RAM: Active</span>
               </div>
@@ -1155,31 +1092,40 @@ export function App() {
                       <span className="neu-claim-badge">SIMULATED AUDITOR</span>
                     </div>
 
-                    {/* Preset Chips */}
-                    <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                      {presets.map((p) => (
-                        <button
-                          key={p.label}
-                          type="button"
-                          className="neu-pill-btn"
-                          style={{
-                            fontSize: '0.72rem',
-                            padding: '4px 10px',
-                            color: enterpriseSpec.thresholdValue === p.amount ? 'var(--accent)' : 'var(--fg-muted)',
-                            boxShadow: enterpriseSpec.thresholdValue === p.amount ? 'var(--shadow-inset-sm)' : 'var(--shadow-extruded-sm)',
-                            fontWeight: enterpriseSpec.thresholdValue === p.amount ? 700 : 500,
-                          }}
-                          onClick={() => {
-                            setEnterpriseSpec((prev) => ({ ...prev, requesterName: p.req, targetField: p.field, thresholdValue: p.amount }));
-                            invalidateDownstreamState('Enterprise requirement preset changed — previous ZK proof invalidated. Please generate a new proof.');
-                            if (extractedTokens.length > 0) {
-                              setDetectedFields(classifyExtractedTargets(extractedTokens, p.amount));
-                            }
-                          }}
-                        >
-                          {p.label}
-                        </button>
-                      ))}
+                    {/* Document Category / Scenario Selector */}
+                    <div>
+                      <label style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--fg-muted)', display: 'block', marginBottom: '4px' }}>
+                        Document Category
+                      </label>
+                      <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                        {SCENARIOS.map((s) => (
+                          <button
+                            key={s.id}
+                            type="button"
+                            className="neu-pill-btn"
+                            style={{
+                              fontSize: '0.72rem',
+                              padding: '4px 10px',
+                              color: enterpriseSpec.documentCategory === s.id ? 'var(--accent)' : 'var(--fg-muted)',
+                              boxShadow: enterpriseSpec.documentCategory === s.id ? 'var(--shadow-inset-sm)' : 'var(--shadow-extruded-sm)',
+                              fontWeight: enterpriseSpec.documentCategory === s.id ? 700 : 500,
+                            }}
+                            onClick={() => applyScenario(s.id)}
+                          >
+                            {s.label}
+                          </button>
+                        ))}
+                      </div>
+                      <p style={{ fontSize: '0.72rem', color: 'var(--fg-muted)', marginTop: '8px', lineHeight: 1.5 }}>
+                        {scenario.description}
+                      </p>
+                      <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap', marginTop: '6px' }}>
+                        {scenario.fields.map((f) => (
+                          <span key={f.key} className="neu-claim-badge" style={{ fontSize: '0.66rem' }}>
+                            {f.label} · {f.action === 'PROVE_AND_BURN' ? 'prove+burn' : f.action === 'DETECT_ONLY' ? 'detect' : 'burn'}
+                          </span>
+                        ))}
+                      </div>
                     </div>
 
                     <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: '10px' }}>
@@ -1201,24 +1147,32 @@ export function App() {
 
                       <div>
                         <label style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--fg-muted)', display: 'block', marginBottom: '4px' }}>
-                          Required Threshold ($ USD)
+                          {scenarioProofBacked ? `Required Threshold (${enterpriseSpec.currency || 'value'})` : 'Predicate'}
                         </label>
-                        <input
-                          type="number"
-                          step="5000"
-                          min="1000"
-                          className="neu-input"
-                          style={{ padding: '10px 14px', fontSize: '0.8rem', fontWeight: 700 }}
-                          value={enterpriseSpec.thresholdValue}
-                          onChange={(e) => {
-                            const val = Number(e.target.value);
-                            setEnterpriseSpec({ ...enterpriseSpec, thresholdValue: val });
-                            invalidateDownstreamState('Enterprise threshold modified — previous ZK proof invalidated.');
-                            if (extractedTokens.length > 0) {
-                              setDetectedFields(classifyExtractedTargets(extractedTokens, val));
-                            }
-                          }}
-                        />
+                        {scenarioProofBacked ? (
+                          <input
+                            type="number"
+                            step="5000"
+                            min="0"
+                            className="neu-input"
+                            style={{ padding: '10px 14px', fontSize: '0.8rem', fontWeight: 700 }}
+                            value={enterpriseSpec.thresholdValue}
+                            onChange={(e) => {
+                              const val = Number(e.target.value);
+                              setEnterpriseSpec({ ...enterpriseSpec, thresholdValue: val });
+                              invalidateDownstreamState('Enterprise threshold modified — previous ZK proof invalidated.');
+                              if (extractedTokens.length > 0) {
+                                setDetectedFields(
+                                  classifyForScenario(extractedTokens, scenario, { thresholdValue: val })
+                                );
+                              }
+                            }}
+                          />
+                        ) : (
+                          <div className="neu-input" style={{ padding: '10px 14px', fontSize: '0.78rem', color: 'var(--fg-muted)' }}>
+                            Seal-only · no numeric predicate
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -1246,7 +1200,8 @@ export function App() {
                       disabled={ocrRunning}
                       style={{ width: '100%', padding: '12px', fontSize: '0.88rem', gap: '8px' }}
                     >
-                      <span>Next →</span>
+                      <span>Proceed to Stage 2: OCR Coordinate Detection</span>
+                      <ArrowRight size={16} />
                     </button>
                   )}
                 </div>
@@ -1255,164 +1210,116 @@ export function App() {
               {/* STAGE 2 VIEW IN TELEMETRY */}
               {stage === 2 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                  <div style={{ fontSize: '0.78rem', lineHeight: 1.45, color: 'var(--fg-muted)' }}>
-                    Search the OCR text or select it directly on the document.
-                  </div>
-                  <div className="neu-well" style={{ padding: '8px 12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <input
-                      type="text"
-                      className="neu-input"
-                      value={stage2SearchQuery}
-                      onChange={(e) => setStage2SearchQuery(e.target.value)}
-                      placeholder="Search OCR text"
-                      style={{
-                        border: 'none',
-                        outline: 'none',
-                        background: 'transparent',
-                        boxShadow: 'none',
-                        padding: '4px 0',
-                        fontSize: '0.82rem',
-                        width: '100%',
-                      }}
-                    />
-                    {stage2SearchQuery && (
-                      <button
-                        type="button"
-                        onClick={() => setStage2SearchQuery('')}
-                        style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-muted)', padding: '2px 4px', fontSize: '0.72rem', fontWeight: 700 }}
-                      >
-                        Clear
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Search Matches Drawer */}
-                  {stage2SearchQuery.trim() && (
-                    <div className="neu-well" style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '6px', maxHeight: '140px', overflowY: 'auto' }}>
-                      <span style={{ fontSize: '0.72rem', color: 'var(--fg-muted)', fontWeight: 600 }}>
-                        Matches ({extractedTokens.filter((t) => t.text.toLowerCase().includes(stage2SearchQuery.trim().toLowerCase())).length})
+                  {/* Real Telemetry Bar */}
+                  {ocrTelemetry && (
+                    <div className="neu-well" style={{ padding: '10px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.74rem', fontFamily: 'var(--font-mono)' }}>
+                      <span style={{ color: 'var(--accent)', fontWeight: 700 }}>
+                        {ocrTelemetry.tokenCount} tokens parsed ({ocrTelemetry.latencyMs}ms)
                       </span>
-                      {extractedTokens.filter((t) => t.text.toLowerCase().includes(stage2SearchQuery.trim().toLowerCase())).length === 0 ? (
-                        <span style={{ fontSize: '0.76rem', color: 'var(--fg-muted)' }}>No matches found</span>
-                      ) : (
-                        extractedTokens
-                          .filter((t) => t.text.toLowerCase().includes(stage2SearchQuery.trim().toLowerCase()))
-                          .map((t) => {
-                            const isAlreadySelected = detectedFields.some(
-                              (f) => f.extractedValue === t.text || (Math.abs(f.x - t.x) < 4 && Math.abs(f.y - t.y) < 4)
-                            );
-                            return (
-                              <div
-                                key={t.id}
-                                style={{
-                                  display: 'flex',
-                                  justifyContent: 'space-between',
-                                  alignItems: 'center',
-                                  padding: '4px 8px',
-                                  borderRadius: '8px',
-                                  backgroundColor: 'var(--bg-surface)',
-                                }}
-                              >
-                                <span style={{ fontSize: '0.78rem', fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--fg-primary)' }}>
-                                  {t.text}
-                                </span>
-                                {isAlreadySelected ? (
-                                  <span style={{ fontSize: '0.7rem', color: 'var(--accent-secondary)', fontWeight: 700 }}>
-                                    Hidden
-                                  </span>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    className="neu-pill-btn"
-                                    style={{ fontSize: '0.7rem', padding: '2px 8px' }}
-                                    onClick={() => handleAddTokenAsTarget(t)}
-                                  >
-                                    Hide
-                                  </button>
-                                )}
-                              </div>
-                            );
-                          })
-                      )}
+                      <span style={{ color: 'var(--fg-muted)' }}>
+                        {detectedFields.length} target zones locked
+                      </span>
                     </div>
                   )}
 
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 2px' }}>
-                      <span style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--fg-primary)' }}>
-                        Selected Things ({detectedFields.length})
-                      </span>
+                  {/* Dynamically Rendered Detected Fields */}
+                  {detectedFields.length === 0 ? (
+                    <div className="neu-well" style={{ padding: '24px', textAlign: 'center', color: 'var(--fg-muted)', fontSize: '0.82rem' }}>
+                      No targets auto-classified. Select tokens below to define redaction regions.
                     </div>
-
-                    {detectedFields.length === 0 ? (
-                      <div className="neu-well" style={{ padding: '16px', textAlign: 'center', color: 'var(--fg-muted)', fontSize: '0.8rem' }}>
-                        Nothing selected.
-                      </div>
-                    ) : (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', maxHeight: '280px', overflowY: 'auto' }}>
-                        {detectedFields.map((field) => {
-                          const isSelected = selectedFieldId === field.id;
-                          const isWitness = field.action === 'PROVE_AND_BURN';
-                          return (
-                            <div
-                              key={field.id}
-                              onClick={() => setSelectedFieldId(field.id)}
-                              className="neu-well"
-                              style={{
-                                padding: '10px 12px',
-                                display: 'grid',
-                                gridTemplateColumns: 'minmax(0, 1fr) auto',
-                                gap: '10px',
-                                alignItems: 'center',
-                                cursor: 'pointer',
-                                boxShadow: isSelected ? 'var(--shadow-inset)' : 'var(--shadow-extruded-sm)',
-                                borderLeft: isSelected ? `3px solid ${isWitness ? 'var(--accent)' : 'var(--accent-secondary)'}` : '3px solid transparent',
-                              }}
-                            >
-                              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', minWidth: 0 }}>
-                                <span
-                                  style={{
-                                    fontSize: '0.82rem',
-                                    fontFamily: 'var(--font-mono)',
-                                    fontWeight: 700,
-                                    color: 'var(--fg-primary)',
-                                    overflow: 'hidden',
-                                    textOverflow: 'ellipsis',
-                                    whiteSpace: 'nowrap',
+                  ) : (
+                    detectedFields.map((field, idx) => {
+                      const isSelected = selectedFieldId === field.id;
+                      const isWitness = field.action === 'PROVE_AND_BURN';
+                      return (
+                        <div
+                          key={field.id}
+                          onClick={() => setSelectedFieldId(field.id)}
+                          className="neu-well"
+                          style={{
+                            padding: '16px',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '10px',
+                            cursor: 'pointer',
+                            boxShadow: isSelected ? 'var(--shadow-inset)' : 'var(--shadow-extruded-sm)',
+                          }}
+                        >
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <Crosshair size={16} style={{ color: isWitness ? 'var(--accent)' : 'var(--accent-secondary)' }} />
+                              <span style={{ fontSize: '0.84rem', fontWeight: 800, color: 'var(--fg-primary)' }}>
+                                Target {idx + 1}: {field.label}
+                              </span>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <span
+                                className="neu-claim-badge"
+                                style={{
+                                  color: isWitness ? 'var(--accent)' : 'var(--accent-secondary)',
+                                }}
+                              >
+                                {isWitness ? 'ZK PROVE & BURN' : 'DIRECT REDACTION'}
+                              </span>
+                              {field.source === 'MANUAL_USER' && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleRemoveTarget(field.id);
                                   }}
+                                  style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-muted)' }}
                                 >
-                                  {field.extractedValue}
-                                </span>
-                                <span style={{ fontSize: '0.7rem', color: 'var(--fg-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                  {field.label} · {isWitness ? 'Prove and hide' : 'Hide'} · x:{field.x} y:{field.y} w:{field.width} h:{field.height}
+                                  <Trash2 size={13} />
+                                </button>
+                              )}
+                            </div>
+                          </div>
+
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ fontSize: '0.8rem', color: 'var(--fg-muted)' }}>Extracted Text:</span>
+                            <span className="neu-secret-badge" style={{ color: isWitness ? 'var(--accent)' : 'inherit', fontWeight: 700 }}>
+                              {field.extractedValue}
+                            </span>
+                          </div>
+
+                          {isWitness && (
+                            <>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <span style={{ fontSize: '0.8rem', color: 'var(--fg-muted)' }}>Enterprise Threshold:</span>
+                                <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8rem', fontWeight: 700 }}>
+                                  &gt;= {enterpriseSpec.thresholdValue.toLocaleString()} {enterpriseSpec.currency}
                                 </span>
                               </div>
 
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleRemoveTarget(field.id);
-                                }}
-                                title="Remove from redaction list"
-                                style={{
-                                  background: 'transparent',
-                                  border: 'none',
-                                  cursor: 'pointer',
-                                  color: 'var(--fg-muted)',
-                                  padding: '4px',
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                }}
-                              >
-                                <Trash2 size={13} />
-                              </button>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <span style={{ fontSize: '0.8rem', color: 'var(--fg-muted)' }}>Condition Satisfied:</span>
+                                <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8rem', fontWeight: 800, color: (field.numericValue || 0) >= enterpriseSpec.thresholdValue ? 'var(--accent-secondary)' : 'var(--fg-muted)' }}>
+                                  {(field.numericValue || 0) >= enterpriseSpec.thresholdValue
+                                    ? `TRUE (${(field.numericValue || 0).toLocaleString()} >= ${enterpriseSpec.thresholdValue.toLocaleString()})`
+                                    : `FALSE (${(field.numericValue || 0).toLocaleString()} < ${enterpriseSpec.thresholdValue.toLocaleString()})`}
+                                </span>
+                              </div>
+                            </>
+                          )}
+
+                          {!isWitness && (
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <span style={{ fontSize: '0.8rem', color: 'var(--fg-muted)' }}>Classification:</span>
+                              <span style={{ fontSize: '0.78rem', color: 'var(--fg-muted)' }}>
+                                {field.classification}
+                              </span>
                             </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
+                          )}
+
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.74rem', fontFamily: 'var(--font-mono)', color: 'var(--fg-muted)', marginTop: '4px' }}>
+                            <span>Bounding Coords: [x: {field.x}, y: {field.y}, w: {field.width}, h: {field.height}]</span>
+                            <span>Page {field.page}</span>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
 
                   {/* Token Explorer Drawer Toggle */}
                   <div className="neu-well" style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
@@ -1453,14 +1360,16 @@ export function App() {
                     )}
                   </div>
 
-                  {/* Stage 2 Primary CTA: Simply say "Next" and right arrow, no emojis or icons */}
+                  {/* Stage 2 Primary CTA: Burn Pixels & Proceed to Stage 3 */}
                   <button
                     className="neu-btn-primary"
                     onClick={executePixelBurn}
                     disabled={isBurning || detectedFields.length === 0}
                     style={{ width: '100%', padding: '12px', fontSize: '0.88rem', gap: '8px' }}
                   >
-                    <span>{isBurning ? 'Processing...' : 'Next →'}</span>
+                    <Flame size={16} />
+                    <span>{isBurning ? 'Burning Pixels & Stripping Streams...' : 'Execute Stage 3: Physical Pixel Burn & Flatten'}</span>
+                    <ArrowRight size={16} />
                   </button>
                 </div>
               )}
@@ -1561,7 +1470,9 @@ export function App() {
                       disabled={isProving}
                       style={{ width: '100%', padding: '12px', fontSize: '0.88rem', gap: '8px' }}
                     >
-                      <span>{isProving ? 'Processing...' : 'Next →'}</span>
+                      <Cpu size={16} className={isProving ? 'spin' : ''} />
+                      <span>{isProving ? 'Compiling In-Browser Groth16 Proof...' : 'Proceed to Stage 4: Groth16 ZK Prover Engine'}</span>
+                      <ArrowRight size={16} />
                     </button>
 
                     <button
@@ -1627,14 +1538,18 @@ export function App() {
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <span style={{ color: 'var(--fg-muted)' }}>Enterprise Threshold:</span>
                         <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--fg-primary)' }}>
-                          &ge; ${enterpriseSpec.thresholdValue.toLocaleString()} {enterpriseSpec.currency}
+                          &ge; {enterpriseSpec.thresholdValue.toLocaleString()} {enterpriseSpec.currency}
                         </span>
                       </div>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <span style={{ color: 'var(--fg-muted)' }}>Private Secret in RAM:</span>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                           <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', letterSpacing: showWitnessSecret ? 'normal' : '2px' }}>
-                            {showWitnessSecret ? `USD ${(witnessTarget?.numericValue || 145000).toLocaleString()}` : '██████████'}
+                            {showWitnessSecret
+                              ? typeof witnessTarget?.numericValue === 'number'
+                                ? `${enterpriseSpec.currency} ${witnessTarget.numericValue.toLocaleString()}`.trim()
+                                : '—'
+                              : '██████████'}
                           </span>
                           <button
                             type="button"
@@ -1807,7 +1722,9 @@ export function App() {
                           disabled={isSealing || !proofVerified}
                           style={{ width: '100%', padding: '13px', fontSize: '0.88rem', gap: '8px' }}
                         >
-                          <span>{isSealing ? 'Processing...' : 'Next →'}</span>
+                          <Fingerprint size={16} className={isSealing ? 'spin' : ''} />
+                          <span>{isSealing ? 'Welding Cryptographic Factors...' : 'Execute Stage 5: Master Audit Seal & Package'}</span>
+                          <ArrowRight size={16} />
                         </button>
 
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
@@ -2006,9 +1923,12 @@ export function App() {
                           fontSize: '0.86rem',
                           gap: '8px',
                           marginTop: '4px',
+                          backgroundColor: 'var(--bg-surface)',
+                          color: 'var(--accent)',
                         }}
                       >
-                        <span>Next →</span>
+                        <ShieldCheck size={16} />
+                        <span>Proceed to Stage 6: Enterprise Verifier Portal →</span>
                       </button>
                     )}
                   </div>
