@@ -185,3 +185,99 @@ export async function generateSamplePdfBytes(): Promise<Uint8Array> {
 
   return await pdfDoc.save();
 }
+
+// Deterministic QR-like block for the specimen card (not a real QR payload).
+function drawSpecimenQr(ctx: CanvasRenderingContext2D, x: number, y: number, size: number) {
+  const n = 21;
+  const cell = size / n;
+  let seed = 7;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  ctx.fillStyle = '#111827';
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < n; c++) {
+      const finder = (r < 7 && c < 7) || (r < 7 && c >= n - 7) || (r >= n - 7 && c < 7);
+      const on = finder
+        ? (r % 6 === 0 || c % 6 === 0 || (r > 1 && r < 5 && c > 1 && c < 5)) && !(r === 6 && c === 6)
+        : rnd() > 0.5;
+      if (on) ctx.fillRect(x + c * cell, y + r * cell, cell, cell);
+    }
+  }
+}
+
+/**
+ * Synthetic Aadhaar-style SPECIMEN card (PNG) for the Aadhaar scenario demo.
+ * Deterministic sample data only — never a real identity: the number starts
+ * with 0 (Aadhaar numbers never do) and the card is watermarked SPECIMEN.
+ * Being a raster image, it exercises the real OCR path end-to-end.
+ */
+export async function generateSampleAadhaarPng(): Promise<Uint8Array> {
+  const W = 1000;
+  const H = 630;
+  const c = document.createElement('canvas');
+  c.width = W;
+  c.height = H;
+  const ctx = c.getContext('2d');
+  if (!ctx) throw new Error('Canvas 2D context unavailable');
+
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#FF9933';
+  ctx.fillRect(0, 0, W, 14);
+  ctx.fillStyle = '#138808';
+  ctx.fillRect(0, H - 14, W, 14);
+
+  ctx.fillStyle = '#1f2937';
+  ctx.font = '600 30px "DM Sans", Arial, sans-serif';
+  ctx.fillText('भारत सरकार', 300, 70);
+  ctx.font = '700 34px "Plus Jakarta Sans", Arial, sans-serif';
+  ctx.fillText('Government of India', 300, 112);
+
+  // Photo placeholder (grey silhouette)
+  ctx.fillStyle = '#e5e7eb';
+  ctx.fillRect(60, 140, 190, 240);
+  ctx.strokeStyle = '#9ca3af';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(60, 140, 190, 240);
+  ctx.fillStyle = '#9ca3af';
+  ctx.beginPath();
+  ctx.arc(155, 220, 45, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(155, 345, 80, 60, 0, Math.PI, 0);
+  ctx.fill();
+
+  // Demographics (Latin name line sits directly above the DOB line, as on real cards)
+  ctx.fillStyle = '#111827';
+  ctx.font = '500 30px Arial, sans-serif';
+  ctx.fillText('नमूना व्यक्ति', 300, 190);
+  ctx.font = '600 34px Arial, sans-serif';
+  ctx.fillText('Specimen Person', 300, 232);
+  ctx.font = '500 30px Arial, sans-serif';
+  ctx.fillText('जन्म तिथि / DOB : 15/08/1998', 300, 284);
+  ctx.fillText('पुरुष / Male', 300, 330);
+
+  drawSpecimenQr(ctx, 790, 150, 170);
+
+  ctx.fillStyle = '#111827';
+  ctx.font = '800 60px "Courier New", monospace';
+  ctx.fillText('0123 4567 8901', 300, 470);
+
+  ctx.fillStyle = '#b91c1c';
+  ctx.font = '600 26px Arial, sans-serif';
+  ctx.fillText('मेरा आधार, मेरी पहचान', 340, 560);
+
+  ctx.save();
+  ctx.globalAlpha = 0.16;
+  ctx.translate(W / 2, H / 2);
+  ctx.rotate(-Math.PI / 9);
+  ctx.fillStyle = '#EA580C';
+  ctx.font = '800 88px "Plus Jakarta Sans", Arial, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('SPECIMEN · NOT A REAL ID', 0, 30);
+  ctx.restore();
+
+  const blob: Blob = await new Promise((resolve, reject) =>
+    c.toBlob((b) => (b ? resolve(b) : reject(new Error('PNG encode failed'))), 'image/png')
+  );
+  return new Uint8Array(await blob.arrayBuffer());
+}

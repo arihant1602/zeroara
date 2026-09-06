@@ -10,6 +10,8 @@ import {
   getScenario,
   DEFAULT_SCENARIO_ID,
   RE_CURRENCY as SCENARIO_CURRENCY,
+  RE_DATE,
+  RE_YEAR,
   type DocumentScenario,
 } from '../../core/scenarios';
 
@@ -70,7 +72,7 @@ async function runTesseract(
   const { createWorker } = await import('tesseract.js');
   const worker: any = await createWorker('eng', 1, {
     workerPath: '/tesseract/worker.min.js',
-    corePath: '/tesseract/tesseract-core-simd-lstm.wasm',
+    corePath: '/tesseract', // directory: tesseract.js v7 appends its own *.wasm.js core loader
     langPath: '/tesseract',
     gzip: true,
     logger: (m: any) => {
@@ -89,7 +91,9 @@ async function runTesseract(
     // parameter tuning is best-effort
   }
 
-  const ret: any = await worker.recognize(image);
+  // tesseract.js v6+: word/line geometry is only returned when the `blocks`
+  // output is requested explicitly (it is off by default).
+  const ret: any = await worker.recognize(image, {}, { text: true, blocks: true });
   await worker.terminate();
 
   return { words: collectTesseractWords(ret.data), rawText: ret.data?.text || '' };
@@ -119,7 +123,128 @@ function meanConfidence(tokens: ExtractedSpatialToken[]): number {
   return vals.length ? vals.reduce((s, c) => s + c, 0) / vals.length : 100;
 }
 
-type ExtractionCore = Omit<DocumentExtractionResult, 'targets' | 'latencyMs' | 'engineName'>;
+type ExtractionCore = Omit<DocumentExtractionResult, 'targets' | 'latencyMs' | 'engineName'> & {
+  engineLabel: string;
+};
+
+const SURYA_SIDECAR_URL = 'http://127.0.0.1:8765/ocr';
+export const SURYA_HEALTH_URL = 'http://127.0.0.1:8765/health';
+
+export interface SuryaHealth {
+  online: boolean;
+  ready: boolean;
+  engine?: string;
+  error?: string | null;
+}
+
+// Cheap liveness/readiness probe for the local Surya sidecar (1.5s timeout).
+export async function checkSuryaHealth(): Promise<SuryaHealth> {
+  try {
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(), 1500);
+    let r: Response;
+    try {
+      r = await fetch(SURYA_HEALTH_URL, { signal: c.signal });
+    } finally {
+      clearTimeout(t);
+    }
+    if (!r.ok) return { online: true, ready: false };
+    const j: any = await r.json();
+    return { online: true, ready: !!j?.model_loaded, engine: j?.engine, error: j?.error ?? null };
+  } catch {
+    return { online: false, ready: false };
+  }
+}
+
+// Primary OCR path: POST the rendered image to the local Surya sidecar
+// (Python/Torch on 127.0.0.1). Returns display-space tokens, or null when the
+// sidecar is unreachable so callers can fall back to in-browser Tesseract.
+async function ocrViaSurya(
+  image: HTMLCanvasElement,
+  factor: number
+): Promise<{ tokens: ExtractedSpatialToken[]; rawText: string; meanConfidence: number } | null> {
+  try {
+    const blob: Blob | null = await new Promise((resolve) =>
+      image.toBlob((b) => resolve(b), 'image/png')
+    );
+    if (!blob) return null;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 120000);
+    let resp: Response;
+    try {
+      resp = await fetch(SURYA_SIDECAR_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'image/png' },
+        body: blob,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!resp.ok) return null;
+
+    const data: any = await resp.json();
+    const lines: any[] = Array.isArray(data?.lines) ? data.lines : [];
+    const norm = (c: any) => (typeof c === 'number' ? (c <= 1 ? c * 100 : c) : 100);
+    const tokens: ExtractedSpatialToken[] = [];
+    const pieces: string[] = [];
+    let idx = 0;
+
+    for (const line of lines) {
+      const ltext = String(line?.text ?? '').trim();
+      if (ltext) pieces.push(ltext);
+      const lconf = norm(line?.confidence);
+      const words: any[] | null =
+        Array.isArray(line?.words) && line.words.length ? line.words : null;
+
+      if (words) {
+        for (const w of words) {
+          const t = String(w?.text ?? '').trim();
+          if (!t) continue;
+          const bb = w?.bbox || line?.bbox || [0, 0, 0, 0];
+          tokens.push({
+            id: `surya_${idx++}`,
+            text: t,
+            x: Math.round(bb[0] * factor),
+            y: Math.round(bb[1] * factor),
+            width: Math.round((bb[2] - bb[0]) * factor),
+            height: Math.round((bb[3] - bb[1]) * factor),
+            page: 1,
+            confidence: Math.round(norm(w?.confidence ?? lconf) * 10) / 10,
+          });
+        }
+      } else if (ltext) {
+        // No per-word boxes: split the line box proportionally by token length.
+        const bb = line?.bbox || [0, 0, 0, 0];
+        const parts = ltext.split(/\s+/).filter(Boolean);
+        const denom = parts.reduce((s, p) => s + p.length, 0) + Math.max(0, parts.length - 1);
+        const lineW = Math.max(1, bb[2] - bb[0]);
+        let cx = bb[0];
+        for (const p of parts) {
+          const wpx = (p.length / Math.max(1, denom)) * lineW;
+          tokens.push({
+            id: `surya_${idx++}`,
+            text: p,
+            x: Math.round(cx * factor),
+            y: Math.round(bb[1] * factor),
+            width: Math.round(wpx * factor),
+            height: Math.round((bb[3] - bb[1]) * factor),
+            page: 1,
+            confidence: Math.round(lconf * 10) / 10,
+          });
+          cx += wpx + (1 / Math.max(1, denom)) * lineW;
+        }
+      }
+    }
+
+    if (!tokens.length) return null;
+    const mc = tokens.reduce((s, t) => s + (t.confidence || 0), 0) / tokens.length;
+    return { tokens, rawText: pieces.join('\n'), meanConfidence: mc };
+  } catch {
+    return null;
+  }
+}
 
 // Paint a (possibly deskewed/warped) cleaned raster into the visible canvas so
 // OCR boxes, HUD overlays, and the pixel-burn all share one coordinate space.
@@ -133,16 +258,35 @@ function drawCleanedToDisplay(canvas: HTMLCanvasElement, src: HTMLCanvasElement)
   }
 }
 
+export class PdfPasswordRequiredError extends Error {
+  incorrect: boolean;
+  constructor(incorrect: boolean) {
+    super(incorrect ? 'Incorrect PDF password' : 'PDF is password-protected');
+    this.name = 'PdfPasswordRequiredError';
+    this.incorrect = incorrect;
+  }
+}
+
 async function extractPdfDocument(
   fileBytes: Uint8Array,
   canvas: HTMLCanvasElement,
-  onProgress?: OcrProgressFn
+  onProgress?: OcrProgressFn,
+  pdfPassword?: string
 ): Promise<ExtractionCore> {
   const loadingTask = (pdfjs as any).getDocument({
     data: fileBytes.slice(),
     standardFontDataUrl: '/standard_fonts/',
+    ...(pdfPassword ? { password: pdfPassword } : {}),
   });
-  const pdf = await loadingTask.promise;
+  let pdf: any;
+  try {
+    pdf = await loadingTask.promise;
+  } catch (e: any) {
+    // e-Aadhaar PDFs are usually password-protected. pdf.js: code 1 = needs
+    // password, 2 = incorrect password. Surface a typed error for the UI.
+    if (e?.name === 'PasswordException') throw new PdfPasswordRequiredError(e?.code === 2);
+    throw e;
+  }
   const page = await pdf.getPage(1);
 
   const unscaled = page.getViewport({ scale: 1 });
@@ -190,10 +334,11 @@ async function extractPdfDocument(
       height: canvas.height,
       numPages: pdf.numPages,
       usedOcrFallback: false,
+      engineLabel: 'pdf.js Vector Text Matrix · Native Spatial',
     };
   }
 
-  // 2) Scanned PDF fallback: supersample -> OpenCV cleanup -> OCR the cleaned raster
+  // 2) Scanned PDF: supersample the page, then OCR it.
   const ocrScale = Math.min(displayScale * OCR_SUPERSAMPLE, OCR_MAX_WIDTH / unscaled.width);
   const ocrViewport = page.getViewport({ scale: ocrScale });
   const off = document.createElement('canvas');
@@ -204,9 +349,30 @@ async function extractPdfDocument(
     await (page.render({ canvasContext: octx, viewport: ocrViewport } as any) as any).promise;
   }
 
+  // Primary: local Surya sidecar on the raw high-res page render.
+  // Geometric cleanup first (perspective + deskew, colour preserved): a neural
+  // recognizer reads a flat, upright card best and its boxes then align with
+  // the displayed (corrected) raster.
+  const photo = await preprocessForOcr(off, (p, s) => onProgress?.(Math.round(p * 0.3), s), { mode: 'photo' });
+  const suryaFactor = DISPLAY_WIDTH / Math.max(1, photo.width);
+  const surya = await ocrViaSurya(photo, suryaFactor);
+  if (surya) {
+    drawCleanedToDisplay(canvas, photo);
+    return {
+      tokens: surya.tokens,
+      rawText: surya.rawText,
+      meanConfidence: surya.meanConfidence,
+      width: canvas.width,
+      height: canvas.height,
+      numPages: pdf.numPages,
+      usedOcrFallback: false,
+      engineLabel: 'Surya OCR · Local Sidecar (127.0.0.1)',
+    };
+  }
+
+  // Fallback: OpenCV cleanup + in-browser Tesseract.
   const cleaned = await preprocessForOcr(off, (p, s) => onProgress?.(Math.round(p * 0.4), s));
   drawCleanedToDisplay(canvas, cleaned);
-
   const { words, rawText } = await runTesseract(cleaned, (p, s) =>
     onProgress?.(40 + Math.round(p * 0.6), s)
   );
@@ -221,6 +387,7 @@ async function extractPdfDocument(
     height: canvas.height,
     numPages: pdf.numPages,
     usedOcrFallback: true,
+    engineLabel: 'Tesseract LSTM · Scanned PDF (OpenCV cleaned)',
   };
 }
 
@@ -261,7 +428,28 @@ async function extractImageDocument(
     octx.drawImage(img, 0, 0, off.width, off.height);
   }
 
-  // OpenCV cleanup (illumination/perspective/deskew/binarize) becomes the visible canvas.
+  // Primary: local Surya sidecar on the raw high-res render.
+  // Geometric cleanup first (perspective + deskew, colour preserved): a neural
+  // recognizer reads a flat, upright card best and its boxes then align with
+  // the displayed (corrected) raster.
+  const photo = await preprocessForOcr(off, (p, s) => onProgress?.(Math.round(p * 0.3), s), { mode: 'photo' });
+  const suryaFactor = DISPLAY_WIDTH / Math.max(1, photo.width);
+  const surya = await ocrViaSurya(photo, suryaFactor);
+  if (surya) {
+    drawCleanedToDisplay(canvas, photo);
+    return {
+      tokens: surya.tokens,
+      rawText: surya.rawText,
+      meanConfidence: surya.meanConfidence,
+      width: canvas.width,
+      height: canvas.height,
+      numPages: 1,
+      usedOcrFallback: false,
+      engineLabel: 'Surya OCR · Local Sidecar (127.0.0.1)',
+    };
+  }
+
+  // Fallback: OpenCV cleanup (illumination/perspective/deskew/binarize) + Tesseract.
   const cleaned = await preprocessForOcr(off, (p, s) => onProgress?.(Math.round(p * 0.4), s));
   drawCleanedToDisplay(canvas, cleaned);
 
@@ -279,6 +467,7 @@ async function extractImageDocument(
     height: canvas.height,
     numPages: 1,
     usedOcrFallback: true,
+    engineLabel: 'Tesseract LSTM · Raster Image (OpenCV cleaned)',
   };
 }
 
@@ -537,6 +726,57 @@ function matchLabelValue(line: ExtractedSpatialToken[], labelRe: RegExp): LineMa
   return { text, tokens: valueToks };
 }
 
+// --- Age witness (Aadhaar) ---------------------------------------------------
+// Aadhaar prints DOB as DD/MM/YYYY (or only a Year of Birth). Derive whole years.
+function ageFromDobText(text: string, now = new Date()): number | null {
+  const m = text.match(/(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/);
+  if (m) {
+    let d = Number(m[1]);
+    let mo = Number(m[2]);
+    let y = Number(m[3]);
+    if (y < 100) y += y >= 30 ? 1900 : 2000;
+    if (mo > 12 && d <= 12) [d, mo] = [mo, d]; // tolerate MM/DD
+    if (mo < 1 || mo > 12 || d < 1 || d > 31 || y < 1900 || y > now.getFullYear()) return null;
+    let age = now.getFullYear() - y;
+    if (now.getMonth() + 1 < mo || (now.getMonth() + 1 === mo && now.getDate() < d)) age -= 1;
+    return age >= 0 && age <= 130 ? age : null;
+  }
+  return null;
+}
+function ageFromYearText(text: string, now = new Date()): number | null {
+  const m = text.match(/\b(19\d{2}|20\d{2})\b/);
+  if (!m) return null;
+  const age = now.getFullYear() - Number(m[1]);
+  return age >= 0 && age <= 130 ? age : null;
+}
+// Split a visual row into horizontally contiguous clusters (a gap wider than
+// ~2.5x the token height separates the demographic column from e.g. QR speckle).
+function clusterByGap(line: ExtractedSpatialToken[]): ExtractedSpatialToken[][] {
+  const sorted = [...line].sort((a, b) => a.x - b.x);
+  const clusters: ExtractedSpatialToken[][] = [];
+  for (const t of sorted) {
+    const cur = clusters[clusters.length - 1];
+    if (cur) {
+      const prev = cur[cur.length - 1];
+      const gap = t.x - (prev.x + prev.width);
+      const h = Math.max(prev.height, t.height, 8);
+      if (gap <= h * 2.5) {
+        cur.push(t);
+        continue;
+      }
+    }
+    clusters.push([t]);
+  }
+  return clusters;
+}
+
+const RE_BIRTH_LINE = /\b(?:dob|d\.o\.b|date of birth|year of birth|yob|birth)\b/i;
+const RE_DEVANAGARI = /[\u0900-\u097F]/;
+const RE_AADHAAR_BOILERPLATE = /government of india|unique identification|aadhaar|\bindia\b|proof of identity|citizenship|authority|\bmera\b/i;
+const RE_NON_BIRTH_DATE = /\b(?:issued?|issue date|date of issue|enrol|enrolment|print|download|valid|expiry|generated|updated)\b|\u091c\u093e\u0930\u0940/i;
+const RE_GENDER_LINE = /\b(?:MALE|FEMALE|TRANSGENDER|Male|Female|Transgender)\b|\u092a\u0941\u0930\u0941\u0937|\u092e\u0939\u093f\u0932\u093e/;
+const RE_GUARDIAN_LINE = /\b(?:S\/O|D\/O|W\/O|C\/O|son of|daughter of|wife of|care of)\b/i;
+
 // Detect and classify redaction targets for a specific document scenario.
 export function classifyForScenario(
   tokens: ExtractedSpatialToken[],
@@ -553,7 +793,12 @@ export function classifyForScenario(
 
   const fields = [...scenario.fields].sort((a, b) => a.priority - b.priority);
   const currencyFields = fields.filter((f) => f.detect.kind === 'currency');
-  const otherFields = fields.filter((f) => f.detect.kind !== 'currency');
+  const ageField = fields.find((f) => f.detect.kind === 'age_from_dob');
+  const nameAboveField = fields.find((f) => f.detect.kind === 'name_above_dob');
+  const photoField = fields.find((f) => f.detect.kind === 'aadhaar_photo_layout');
+  const otherFields = fields.filter(
+    (f) => !['currency', 'age_from_dob', 'name_above_dob', 'aadhaar_photo_layout'].includes(f.detect.kind)
+  );
 
   // Pattern + label-anchored fields (identifiers, names, dates, addresses...).
   for (const field of otherFields) {
@@ -593,6 +838,142 @@ export function classifyForScenario(
             fieldKey: field.key,
           });
         }
+      }
+    }
+  }
+
+  // Age witness: score every date on the page — a birth-labelled line wins,
+  // issue/enrolment/print dates lose, rotated edge text (tall narrow boxes) loses.
+  // Burns the DOB and carries age as the numeric value for the ZK predicate.
+  let dobLineIdx = -1;
+  if (ageField) {
+    interface DobCand { li: number; mt: LineMatch; age: number; score: number }
+    const cands: DobCand[] = [];
+    for (let li = 0; li < lines.length; li++) {
+      const line = lines[li];
+      const lineText = line.map((t) => t.text).join(' ');
+      const birthLabelled = RE_BIRTH_LINE.test(lineText);
+      let mt = matchInLine(line, RE_DATE)[0];
+      let age = mt ? ageFromDobText(mt.text) : null;
+      if ((!mt || age === null) && birthLabelled) {
+        mt = matchInLine(line, RE_YEAR)[0];
+        age = mt ? ageFromYearText(mt.text) : null;
+      }
+      if (!mt || age === null || isClaimed(mt.tokens)) continue;
+      const box = unionBox(mt.tokens, 0);
+      let score = 0;
+      if (birthLabelled) score += 100;
+      if (RE_NON_BIRTH_DATE.test(lineText)) score -= 100;
+      if (box.height > box.width * 1.3) score -= 60; // vertical / rotated text
+      cands.push({ li, mt, age, score });
+    }
+    cands.sort((a, b) => b.score - a.score || a.li - b.li);
+    const best = cands[0];
+    if (best) {
+      claim(best.mt.tokens);
+      dobLineIdx = best.li;
+      targets.push({
+        id: `field_${ageField.key}_${counter++}`,
+        label: ageField.label,
+        classification: ageField.classification,
+        extractedValue: best.mt.text,
+        numericValue: best.age,
+        satisfiesThreshold: best.age >= opts.thresholdValue,
+        ...unionBox(best.mt.tokens),
+        page: 1,
+        action: ageField.action,
+        source: 'OCR_AUTO',
+        confidence: tokenConfidence(best.mt.tokens),
+        fieldKey: ageField.key,
+      });
+    }
+  }
+
+  // Demographic-column anchor for the name/photo layout: the DOB line, else a
+  // birth-labelled line, else the gender line (never depends on a correct DOB).
+  const genderLineIdx = lines.findIndex((l) => RE_GENDER_LINE.test(l.map((t) => t.text).join(' ')));
+  const birthLabelIdx = lines.findIndex((l) => RE_BIRTH_LINE.test(l.map((t) => t.text).join(' ')));
+  const anchorIdx = dobLineIdx >= 0 ? dobLineIdx : birthLabelIdx >= 0 ? birthLabelIdx : genderLineIdx;
+
+  // Name: on Aadhaar the (Latin-script) name sits directly above the DOB line,
+  // left-aligned in the same column. Require column alignment + real letters so
+  // OCR speckle elsewhere on the card can never be mistaken for a name.
+  let nameLineIdx = -1;
+  if (nameAboveField && anchorIdx > 0) {
+    const anchorLine = lines[anchorIdx];
+    const dobX0 = Math.min(...anchorLine.map((t) => t.x));
+    const dobH = Math.max(...anchorLine.map((t) => t.height));
+    const dobY0 = Math.min(...anchorLine.map((t) => t.y));
+    for (let li = anchorIdx - 1; li >= Math.max(0, anchorIdx - 4); li--) {
+      const line = lines[li];
+      const lineText = line.map((t) => t.text).join(' ').trim();
+      if (!lineText || RE_DEVANAGARI.test(lineText) || RE_AADHAAR_BOILERPLATE.test(lineText)) continue;
+      if (RE_GUARDIAN_LINE.test(lineText)) continue; // "S/O …" is the guardian, not the holder
+      const letters = lineText.replace(/[^A-Za-z]/g, '');
+      if (letters.length < 3 || letters.length / lineText.replace(/\s/g, '').length < 0.8) continue;
+      // Only the cluster that shares the DOB column is the name; anything to the
+      // right (QR/photo speckle read as "words") is discarded from text AND box.
+      const cluster = clusterByGap(line).find((c) => Math.abs(Math.min(...c.map((t) => t.x)) - dobX0) <= dobH * 3);
+      if (!cluster) continue;
+      const lineY1 = Math.max(...cluster.map((t) => t.y + t.height));
+      if (dobY0 - lineY1 > dobH * 4) continue; // too far above to be the adjacent name line
+      const toks = cluster.filter((t) => !claimed.has(t.id));
+      if (!toks.length) continue;
+      const clusterText = toks.map((t) => t.text).join(' ').trim();
+      if (clusterText.replace(/[^A-Za-z]/g, '').length < 3) continue;
+      claim(toks);
+      nameLineIdx = li;
+      targets.push({
+        id: `field_${nameAboveField.key}_${counter++}`,
+        label: nameAboveField.label,
+        classification: nameAboveField.classification,
+        extractedValue: clusterText,
+        ...unionBox(toks),
+        page: 1,
+        action: nameAboveField.action,
+        source: 'OCR_AUTO',
+        confidence: tokenConfidence(toks),
+        fieldKey: nameAboveField.key,
+      });
+      break;
+    }
+  }
+
+  // Photo: the Aadhaar portrait sits immediately left of the demographic column
+  // and spans roughly twice the name→gender block height (portrait ~4:5).
+  // Layout-inferred (no face detection) — clearly labelled, user can remove it.
+  if (photoField && anchorIdx >= 0) {
+    const topLine = lines[nameLineIdx >= 0 ? nameLineIdx : anchorIdx];
+    const bottomLine = lines[genderLineIdx >= 0 ? genderLineIdx : anchorIdx];
+    const anchorLine = lines[anchorIdx];
+    const colX0 = Math.min(...anchorLine.map((t) => t.x));
+    const lineH = Math.max(...anchorLine.map((t) => t.height));
+    const top = Math.min(...topLine.map((t) => t.y));
+    const bottom = Math.max(...bottomLine.map((t) => t.y + t.height));
+    const block = bottom - top;
+    if (block >= lineH) {
+      // Ratios measured on a real Aadhaar front: portrait height ≈ 2.7× the
+      // name→gender block, portrait ≈ 4:5, ~1.3 line-heights left of the column.
+      const photoH = block * 2.7;
+      const photoW = photoH * 0.8;
+      const x1 = colX0 - lineH * 1.3;
+      const x0 = Math.max(0, x1 - photoW);
+      const y0 = Math.max(0, top - photoH * 0.15);
+      if (x1 - x0 >= lineH * 2) {
+        targets.push({
+          id: `field_${photoField.key}_${counter++}`,
+          label: photoField.label,
+          classification: photoField.classification,
+          extractedValue: '[image region · inferred from card layout]',
+          x: Math.round(x0),
+          y: Math.round(y0),
+          width: Math.round(x1 - x0),
+          height: Math.round(photoH),
+          page: 1,
+          action: photoField.action,
+          source: 'OCR_AUTO',
+          fieldKey: photoField.key,
+        });
       }
     }
   }
@@ -695,7 +1076,8 @@ export async function extractDocumentSpatial(
   canvas: HTMLCanvasElement,
   thresholdValue: number,
   onProgress?: OcrProgressFn,
-  scenarioId?: string
+  scenarioId?: string,
+  pdfPassword?: string
 ): Promise<DocumentExtractionResult> {
   const start = performance.now();
 
@@ -707,25 +1089,25 @@ export async function extractDocumentSpatial(
     height: canvas.height,
     numPages: 1,
     usedOcrFallback: false,
+    engineLabel: 'Inert · Unsupported Document Type',
   };
-  let engineName = 'Inert · Unsupported Document Type';
 
   if (doc.mimeType === 'application/pdf' && doc.rawBytes) {
-    core = await extractPdfDocument(doc.rawBytes, canvas, onProgress);
-    engineName = core.usedOcrFallback
-      ? 'Tesseract LSTM Neural OCR · Scanned PDF (2.0× supersampled, OpenCV cleaned)'
-      : 'pdf.js Vector Text Matrix · Native Spatial';
+    core = await extractPdfDocument(doc.rawBytes, canvas, onProgress, pdfPassword);
   } else if (doc.fileObj && doc.mimeType.startsWith('image/')) {
     core = await extractImageDocument(doc.fileObj, canvas, onProgress);
-    engineName = 'Tesseract LSTM Neural OCR · Raster Image (2.0× supersampled, OpenCV cleaned)';
   }
 
   const scenario = getScenario(scenarioId ?? DEFAULT_SCENARIO_ID);
   const targets = classifyForScenario(core.tokens, scenario, { thresholdValue });
+  if (import.meta.env.DEV) {
+    // Dev-only diagnostics (stripped from production builds): never logs document text in prod.
+    console.debug('[ocr:dev] lines:', groupLines(core.tokens).map((l) => l.map((t) => t.text).join(' ')));
+  }
   return {
     ...core,
     targets,
-    engineName,
+    engineName: core.engineLabel,
     latencyMs: Math.max(1, Math.round(performance.now() - start)),
   };
 }

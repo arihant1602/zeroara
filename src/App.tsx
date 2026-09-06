@@ -4,8 +4,12 @@ import {
   sha256Hex,
   formatChunkedHash,
   generateSamplePdfBytes,
+  generateSampleAadhaarPng,
   extractDocumentSpatial,
   classifyForScenario,
+  checkSuryaHealth,
+  PdfPasswordRequiredError,
+  type SuryaHealth,
   createFlattenedRedactedPdf,
   downloadFile,
   generateIncomeThresholdProof,
@@ -86,6 +90,8 @@ export interface OcrTelemetrySummary {
 }
 
 export type StageNumber = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+// MVP surface: stages 7-8 (enclave/transport) are scaffolds and hidden from the stepper.
+export const MAX_STAGE: StageNumber = 6;
 
 export const STAGE_CONFIG: Record<StageNumber, { title: string; subtitle: string; telemetryTitle: string }> = {
   1: {
@@ -194,6 +200,26 @@ export function App() {
   const [detectedFields, setDetectedFields] = useState<ClassifiedTarget[]>([]);
   const [extractedTokens, setExtractedTokens] = useState<ExtractedSpatialToken[]>([]);
   const [ocrTelemetry, setOcrTelemetry] = useState<OcrTelemetrySummary | null>(null);
+  const [suryaStatus, setSuryaStatus] = useState<SuryaHealth>({ online: false, ready: false });
+  // Password-protected PDFs (e-Aadhaar): prompt inline, then re-run extraction.
+  const [pdfPassword, setPdfPassword] = useState<string>('');
+  const [pdfPasswordDraft, setPdfPasswordDraft] = useState<string>('');
+  const [pdfLocked, setPdfLocked] = useState<{ incorrect: boolean } | null>(null);
+
+  // Poll the local Surya OCR sidecar so Stage 2 can say which engine will run.
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      const s = await checkSuryaHealth();
+      if (alive) setSuryaStatus(s);
+    };
+    poll();
+    const id = setInterval(poll, 8000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -261,8 +287,10 @@ export function App() {
           canvas,
           enterpriseSpec.thresholdValue,
           undefined,
-          enterpriseSpec.documentCategory
+          enterpriseSpec.documentCategory,
+          pdfPassword || undefined
         );
+        setPdfLocked(null);
 
         if (isCancelled) return;
 
@@ -290,7 +318,11 @@ export function App() {
           drawBoundingBoxOverlays(canvas, result.targets, result.targets[0]?.id || null);
         }
       } catch (err) {
-        console.error('Document spatial processing error:', err);
+        if (err instanceof PdfPasswordRequiredError) {
+          setPdfLocked({ incorrect: err.incorrect });
+        } else {
+          console.error('Document spatial processing error:', err);
+        }
       } finally {
         if (!isCancelled) {
           setOcrRunning(false);
@@ -303,7 +335,7 @@ export function App() {
     return () => {
       isCancelled = true;
     };
-  }, [doc]);
+  }, [doc, pdfPassword]);
 
   // Synchronous blit & redraw overlays whenever Stage, HUD toggle, or target selection changes
   useEffect(() => {
@@ -335,7 +367,10 @@ export function App() {
         ctx.putImageData(cleanCanvasDataRef.current, 0, 0);
       }
 
-      const result = await createFlattenedRedactedPdf(canvas, detectedFields);
+      const result = await createFlattenedRedactedPdf(
+        canvas,
+        detectedFields.filter((f) => f.action !== 'DETECT_ONLY')
+      );
       setRedactionResult(result);
       setViewMode('BURNED');
       setStage(3);
@@ -585,6 +620,9 @@ export function App() {
       fileObj: file,
     };
 
+    setPdfPassword('');
+    setPdfPasswordDraft('');
+    setPdfLocked(null);
     setDoc(newDoc);
     setRedactionResult(null);
     invalidateDownstreamState('New document uploaded — previous proofs and seals cleared.');
@@ -594,21 +632,32 @@ export function App() {
 
   // Ingest synthesized authentic sample PDF document
   const handleLoadSample = async () => {
-    const samplePdfBytes = await generateSamplePdfBytes();
-    const hashHex = await sha256Hex(samplePdfBytes);
+    // Sample follows the selected scenario: a SPECIMEN Aadhaar raster for the
+    // Aadhaar flow (exercises real OCR), the income certificate PDF otherwise.
+    const isAadhaar = scenario.id === 'aadhaar';
+    const sampleBytes = isAadhaar ? await generateSampleAadhaarPng() : await generateSamplePdfBytes();
+    const hashHex = await sha256Hex(sampleBytes);
     const chunkedHash = formatChunkedHash(hashHex);
+    const fileName = isAadhaar ? 'Aadhaar_SPECIMEN_sample.png' : 'Accredited_Investor_Verification_ApexLP.pdf';
+    const mimeType = isAadhaar ? 'image/png' : 'application/pdf';
 
     const newDoc: IngestedDoc = {
-      fileName: 'Accredited_Investor_Verification_ApexLP.pdf',
-      fileSizeBytes: samplePdfBytes.length,
-      mimeType: 'application/pdf',
+      fileName,
+      fileSizeBytes: sampleBytes.length,
+      mimeType,
       hashHex,
       chunkedHash,
       timestamp: new Date().toLocaleTimeString(),
       isSample: true,
-      rawBytes: samplePdfBytes,
+      rawBytes: sampleBytes,
+      ...(isAadhaar
+        ? { fileObj: new File([sampleBytes as unknown as BlobPart], fileName, { type: mimeType }) }
+        : {}),
     };
 
+    setPdfPassword('');
+    setPdfPasswordDraft('');
+    setPdfLocked(null);
     setDoc(newDoc);
     setRedactionResult(null);
     invalidateDownstreamState('Sample document loaded — previous proofs and seals cleared.');
@@ -627,7 +676,7 @@ export function App() {
     const stageParam = params.get('stage') || params.get('phase');
     if (stageParam) {
       const s = parseInt(stageParam, 10);
-      if (s >= 1 && s <= 8) setStage(s as StageNumber);
+      if (s >= 1 && s <= MAX_STAGE) setStage(s as StageNumber);
     }
 
     if (params.get('sample') === 'true') {
@@ -703,6 +752,34 @@ export function App() {
   };
 
   // Remove a target
+  // Aadhaar: the photo and QR are image regions Surya cannot read as text.
+  // Offer one-click suggested regions (proportional to the card) that the user
+  // can keep or remove. They burn as DIRECT_BURN and bind into the seal.
+  const addRegionTarget = (key: 'photo' | 'qr') => {
+    const c = canvasRef.current;
+    if (!c) return;
+    const spec =
+      key === 'photo'
+        ? { label: 'Photo (face)', cls: 'Biometric Photo Region', x: 0.06, y: 0.22, w: 0.22, h: 0.42 }
+        : { label: 'QR Code', cls: 'Aadhaar QR (encodes demographics)', x: 0.8, y: 0.06, w: 0.16, h: 0.3 };
+    const t: ClassifiedTarget = {
+      id: `manual_${key}_${Date.now()}`,
+      label: spec.label,
+      classification: spec.cls,
+      extractedValue: '[image region]',
+      x: Math.round(spec.x * c.width),
+      y: Math.round(spec.y * c.height),
+      width: Math.round(spec.w * c.width),
+      height: Math.round(spec.h * c.height),
+      page: 1,
+      action: 'DIRECT_BURN',
+      source: 'MANUAL_USER',
+      fieldKey: key,
+    };
+    setDetectedFields((prev) => [...prev.filter((f) => f.fieldKey !== key), t]);
+    setSelectedFieldId(t.id);
+  };
+
   const handleRemoveTarget = (id: string) => {
     setDetectedFields((prev) => prev.filter((f) => f.id !== id));
     if (selectedFieldId === id) {
@@ -763,7 +840,7 @@ export function App() {
               </span>
               <span className="neu-severed-pill">
                 <WifiOff size={13} style={{ display: 'inline', marginRight: '4px', verticalAlign: '-1px' }} />
-                EGRESS: 0 KB / 0 REQUESTS [SEVERED]
+                {suryaStatus.online ? 'EGRESS: 0 KB · OCR VIA LOCAL SIDECAR (127.0.0.1)' : 'EGRESS: 0 KB / 0 REQUESTS [SEVERED]'}
               </span>
             </div>
 
@@ -793,7 +870,7 @@ export function App() {
                   style={{ fontSize: '0.84rem', padding: '9px 18px' }}
                   onClick={handleLoadSample}
                 >
-                  Load Sample Document
+                  {scenario.id === 'aadhaar' ? 'Load Specimen Aadhaar' : 'Load Sample Document'}
                 </button>
               )}
             </div>
@@ -828,7 +905,7 @@ export function App() {
                       {STAGE_CONFIG[stage].title}
                     </h2>
                     <span className="neu-badge" style={{ fontSize: '0.72rem', padding: '3px 9px' }}>
-                      {stage} / 8
+                      {stage} / {MAX_STAGE}
                     </span>
                   </div>
                   <p style={{ fontSize: '0.78rem', color: 'var(--fg-muted)', marginTop: '2px' }}>
@@ -839,7 +916,7 @@ export function App() {
 
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                 <span className="neu-status-pill" style={{ padding: '6px 14px', fontSize: '0.75rem', fontFamily: 'var(--font-mono)' }}>
-                  {Math.round((stage / 8) * 100)}% COMPLETE
+                  {Math.round((stage / MAX_STAGE) * 100)}% COMPLETE
                 </span>
                 <div style={{ display: 'flex', gap: '6px' }}>
                   <button
@@ -856,14 +933,14 @@ export function App() {
                     type="button"
                     className="neu-btn-primary"
                     style={{ padding: '7px 16px', fontSize: '0.78rem', gap: '5px' }}
-                    onClick={() => setStage((prev) => Math.min(8, prev + 1) as StageNumber)}
+                    onClick={() => setStage((prev) => Math.min(MAX_STAGE, prev + 1) as StageNumber)}
                     disabled={
                       (stage === 1 && !doc) ||
                       (stage === 2 && detectedFields.length === 0) ||
                       (stage === 3 && !redactionResult) ||
                       (stage === 4 && !proofResult) ||
                       (stage === 5 && !masterSeal) ||
-                      stage === 8
+                      stage === MAX_STAGE
                     }
                   >
                     <span>Next</span>
@@ -877,7 +954,7 @@ export function App() {
             <div className="neu-progress-track">
               <div
                 className="neu-progress-fill"
-                style={{ width: `${(stage / 8) * 100}%` }}
+                style={{ width: `${(stage / MAX_STAGE) * 100}%` }}
               />
             </div>
           </div>
@@ -966,7 +1043,7 @@ export function App() {
                     Drop your document here, or click to browse
                   </h4>
                   <p style={{ fontSize: '0.84rem', color: 'var(--fg-muted)', marginTop: '6px', maxWidth: '380px' }}>
-                    Supports <strong>PDF and images</strong> — PNG, JPEG, WebP, GIF, BMP, and AVIF. Ingested directly into your browser's private memory isolate with <strong>0 network requests</strong>.
+                    Supports <strong>PDF and images</strong> — PNG, JPEG, WebP, GIF, BMP, and AVIF. Processed entirely on this machine — OCR runs in-browser or on a local sidecar at 127.0.0.1. <strong>Nothing leaves your device.</strong>
                   </p>
                   {uploadError && (
                     <p role="alert" style={{ fontSize: '0.78rem', color: '#B91C1C', marginTop: '8px', maxWidth: '420px' }}>
@@ -989,7 +1066,7 @@ export function App() {
                     style={{ fontSize: '0.84rem', padding: '10px 18px' }}
                     onClick={(e) => { e.stopPropagation(); handleLoadSample(); }}
                   >
-                    Load Sample Certificate
+                    {scenario.id === 'aadhaar' ? 'Load Specimen Aadhaar' : 'Load Sample Certificate'}
                   </button>
                 </div>
               </div>
@@ -1041,7 +1118,7 @@ export function App() {
 
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.74rem', fontFamily: 'var(--font-mono)', color: 'var(--fg-muted)' }}>
                 <span>
-                  Spatial State: {stage >= 3 && viewMode === 'BURNED' ? 'Flattened Non-Extractable Raster' : (ocrTelemetry ? ocrTelemetry.engineName : 'Native Canvas')}
+                  Spatial State: {stage >= 3 && viewMode === 'BURNED' ? 'Flattened Non-Extractable Raster' : (ocrTelemetry ? ocrTelemetry.engineName : suryaStatus.ready ? 'Surya OCR · local sidecar ready' : suryaStatus.online ? 'Surya OCR · warming up…' : 'Surya offline · Tesseract fallback')}
                 </span>
                 <span>Isolated RAM: Active</span>
               </div>
@@ -1257,7 +1334,41 @@ export function App() {
                   {/* Dynamically Rendered Detected Fields */}
                   {detectedFields.length === 0 ? (
                     <div className="neu-well" style={{ padding: '24px', textAlign: 'center', color: 'var(--fg-muted)', fontSize: '0.82rem' }}>
-                      No targets auto-classified. Select tokens below to define redaction regions.
+                      {pdfLocked ? (
+                        <form
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            setPdfPassword(pdfPasswordDraft.trim());
+                          }}
+                          style={{ display: 'flex', flexDirection: 'column', gap: '10px', alignItems: 'stretch', textAlign: 'left' }}
+                        >
+                          <span style={{ fontSize: '0.82rem', fontWeight: 800, color: 'var(--fg-primary)' }}>
+                            This PDF is password-protected
+                          </span>
+                          <span style={{ fontSize: '0.76rem', color: 'var(--fg-muted)' }}>
+                            e-Aadhaar passwords are the first 4 letters of your name in CAPITALS + birth year (e.g. RAHU1998). The password never leaves this device.
+                          </span>
+                          {pdfLocked.incorrect && (
+                            <span role="alert" style={{ fontSize: '0.76rem', color: '#B91C1C' }}>Incorrect password — try again.</span>
+                          )}
+                          <div style={{ display: 'flex', gap: '8px' }}>
+                            <input
+                              type="password"
+                              className="neu-input"
+                              style={{ flex: 1, padding: '10px 14px', fontSize: '0.8rem' }}
+                              placeholder="PDF password"
+                              value={pdfPasswordDraft}
+                              onChange={(e) => setPdfPasswordDraft(e.target.value)}
+                              autoFocus
+                            />
+                            <button type="submit" className="neu-btn-primary" style={{ fontSize: '0.8rem', padding: '10px 16px' }}>
+                              Unlock
+                            </button>
+                          </div>
+                        </form>
+                      ) : (
+                        <>No targets auto-classified. Select tokens below to define redaction regions.{!suryaStatus.ready && ' Higher-accuracy OCR is available: start the local Surya sidecar (./sidecar/run.sh) and re-upload.'}</>
+                      )}
                     </div>
                   ) : (
                     detectedFields.map((field, idx) => {
@@ -1351,6 +1462,22 @@ export function App() {
                         </div>
                       );
                     })
+                  )}
+
+                  {scenario.id === 'aadhaar' && (
+                    <div className="neu-well" style={{ padding: '12px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', flexWrap: 'wrap' }}>
+                      <span style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--fg-primary)' }}>
+                        Image regions (not readable as text)
+                      </span>
+                      <div style={{ display: 'flex', gap: '6px' }}>
+                        <button type="button" className="neu-pill-btn" style={{ fontSize: '0.72rem', padding: '4px 10px' }} onClick={() => addRegionTarget('photo')}>
+                          + Photo region
+                        </button>
+                        <button type="button" className="neu-pill-btn" style={{ fontSize: '0.72rem', padding: '4px 10px' }} onClick={() => addRegionTarget('qr')}>
+                          + QR region
+                        </button>
+                      </div>
+                    </div>
                   )}
 
                   {/* Token Explorer Drawer Toggle */}
@@ -1579,7 +1706,9 @@ export function App() {
                           <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', letterSpacing: showWitnessSecret ? 'normal' : '2px' }}>
                             {showWitnessSecret
                               ? typeof witnessTarget?.numericValue === 'number'
-                                ? `${enterpriseSpec.currency} ${witnessTarget.numericValue.toLocaleString()}`.trim()
+                                ? (enterpriseSpec.currency === 'years'
+                                    ? `${witnessTarget.numericValue} years`
+                                    : `${enterpriseSpec.currency} ${witnessTarget.numericValue.toLocaleString()}`.trim())
                                 : '—'
                               : '██████████'}
                           </span>

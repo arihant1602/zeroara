@@ -199,7 +199,7 @@ export const VerifierPortalView: React.FC<VerifierPortalViewProps> = ({
                   <div>Requester: <strong>{activePkg.enterpriseRequirement.requesterName}</strong></div>
                   <div>Predicate: <strong>{activePkg.enterpriseRequirement.predicate}</strong></div>
                   <div>Target Field: <strong>{activePkg.enterpriseRequirement.targetField}</strong></div>
-                  <div>Threshold: <strong>≥ ${activePkg.enterpriseRequirement.thresholdValue.toLocaleString()} {activePkg.enterpriseRequirement.currency}</strong></div>
+                  <div>Threshold: <strong>≥ {activePkg.enterpriseRequirement.thresholdValue.toLocaleString()} {activePkg.enterpriseRequirement.currency}</strong></div>
                   <div>Burned Zones: <strong>{activePkg.sanitizedDocument.burnedBoundingBoxes.length} Coordinates</strong></div>
                   <div>Text Streams: <strong>{activePkg.sanitizedDocument.textStreamsDetected} (Stripped)</strong></div>
                 </div>

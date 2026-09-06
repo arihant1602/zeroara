@@ -25,3 +25,10 @@ src-tauri/target/
 *.sln
 *.sw?
 .vercel
+
+# local Python venv for the Surya OCR sidecar (pure PyTorch)
+.surya/
+
+# Python bytecode (sidecar)
+__pycache__/
+*.pyc

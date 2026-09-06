@@ -30,7 +30,13 @@ export type FieldDetector =
   // Label keyword on a line; the tokens after the label on that line are the value.
   | { kind: 'label'; re: RegExp }
   // Currency/number amounts (handled specially so a witness can be chosen).
-  | { kind: 'currency' };
+  | { kind: 'currency' }
+  // Date/Year of Birth line -> burns the DOB and yields numericValue = age in years (witness).
+  | { kind: 'age_from_dob' }
+  // The Latin-script name line directly above the DOB line (Aadhaar card layout).
+  | { kind: 'name_above_dob' }
+  // Aadhaar portrait region inferred from the demographic-column geometry.
+  | { kind: 'aadhaar_photo_layout' };
 
 export interface ScenarioField {
   key: string;
@@ -66,7 +72,12 @@ export interface DocumentScenario {
 
 // --- Shared detectors -------------------------------------------------------
 // India-specific and generic identifiers.
-export const RE_AADHAAR = /\b\d{4}\s?\d{4}\s?\d{4}\b/;               // 12 digits, grouped
+export const RE_AADHAAR =
+  // Trailing 4-4-4 groups (digits or masked XXXX/****) ending at a word boundary.
+  // No leading \b on purpose: OCR often fuses speckle/photo-edge noise onto the
+  // first group (e.g. "770123 4567 8901"), and we must still find "0123 4567 8901".
+  /(?:\d{4}|[Xx]{4}|\*{4})[\s-]?(?:\d{4}|[Xx]{4}|\*{4})[\s-]?\d{4}\b/;
+export const RE_VID = /\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b/;   // 16-digit Aadhaar VID
 export const RE_PAN = /\b[A-Z]{5}\d{4}[A-Z]\b/;                      // ABCDE1234F
 export const RE_IFSC = /\b[A-Z]{4}0[A-Z0-9]{6}\b/;                   // HDFC0001234
 export const RE_ACCOUNT = /\b\d{9,18}\b/;                            // bank account no.
@@ -75,6 +86,7 @@ export const RE_YEAR = /\b(?:19|20)\d{2}\b/;
 export const RE_EMAIL = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/;
 export const RE_PHONE_IN = /\b(?:\+91[\-\s]?)?[6-9]\d{9}\b/;         // Indian mobile
 export const RE_SSN = /\b\d{3}[-\s]\d{2}[-\s]\d{4}\b/;               // US SSN (legacy)
+export const RE_GENDER = /\b(?:MALE|FEMALE|TRANSGENDER|Male|Female|Transgender)\b|\u092a\u0941\u0930\u0941\u0937|\u092e\u0939\u093f\u0932\u093e/;
 export const RE_CURRENCY =
   /(?:INR|Rs\.?|₹|USD|US\$|\$|€|£)\s?\d{1,3}(?:,\d{2,3})*(?:\.\d{1,2})?|\d{1,3}(?:,\d{2,3})+(?:\.\d{1,2})?(?:\s?(?:INR|USD|EUR|GBP))?/;
 
@@ -90,6 +102,7 @@ const L_EMPID = /\b(?:emp(?:loyee)?\.?\s*(?:id|code|no)|staff\s*id)\b/i;
 const L_EMPLOYER = /\b(?:employer|company|organi[sz]ation|firm)\b/i;
 const L_DOCNO = /\b(?:document\s*(?:no|number)|id\s*(?:no|number)|reference\s*(?:no|number))\b/i;
 const L_VID = /\b(?:vid|virtual id|enrol?ment no)\b/i;
+const L_GUARDIAN = /\b(?:S\/O|D\/O|W\/O|C\/O|son of|daughter of|wife of|care of)\b/i;
 
 const PREDICATE_GTE = '>= (Greater than or equal to)';
 const PREDICATE_SEAL_ONLY = 'Seal-only (no numeric predicate)';
@@ -122,16 +135,20 @@ export const SCENARIOS: DocumentScenario[] = [
     label: 'Aadhaar Card',
     category: 'Indian Identity Document',
     description:
-      'UIDAI Aadhaar card. Redacts the 12-digit Aadhaar number, name, date/year of birth, and address. Identity document — seal-only (no numeric predicate proof).',
-    proofMode: 'SEAL_ONLY',
+      'UIDAI Aadhaar (card photo, e-Aadhaar PDF, or masked Aadhaar). Burns the 12-digit / masked number, name, gender, and date of birth, and proves AGE \u2265 threshold from the DOB without revealing it.',
+    proofMode: 'PROOF_BACKED',
     fields: [
       { key: 'aadhaar', label: 'Aadhaar Number', classification: 'Aadhaar / UIDAI Number (Sensitive PII)', action: 'DIRECT_BURN', detect: { kind: 'pattern', re: RE_AADHAAR }, priority: 5 },
-      nameField(),
-      dobField(),
+      { key: 'gender', label: 'Gender', classification: 'Personal Attribute (PII)', action: 'DIRECT_BURN', detect: { kind: 'pattern', re: RE_GENDER }, priority: 12 },
+      { key: 'age', label: 'Date of Birth', classification: 'Age Witness (ZK Predicate: age \u2265 threshold)', action: 'PROVE_AND_BURN', detect: { kind: 'age_from_dob' }, numeric: true, isWitness: true, priority: 20 },
+      { key: 'name', label: 'Full Name', classification: 'Personal Name (PII)', action: 'DIRECT_BURN', detect: { kind: 'name_above_dob' }, priority: 30 },
       addressField(),
-      { key: 'vid', label: 'VID / Enrolment Reference', classification: 'Aadhaar Reference Identifier', action: 'DETECT_ONLY', detect: { kind: 'label', re: L_VID }, priority: 40 },
+      { key: 'vid', label: 'Virtual ID (VID)', classification: 'Aadhaar Virtual Identifier (Sensitive PII)', action: 'DIRECT_BURN', detect: { kind: 'pattern', re: RE_VID }, priority: 4 },
+      { key: 'guardian', label: 'Parent / Guardian Name', classification: 'Relation Name (PII)', action: 'DIRECT_BURN', detect: { kind: 'label', re: L_GUARDIAN }, priority: 25 },
+      { key: 'photo', label: 'Photo (face)', classification: 'Biometric Photo Region (layout-inferred)', action: 'DIRECT_BURN', detect: { kind: 'aadhaar_photo_layout' }, priority: 60 },
+      { key: 'enrolment', label: 'Enrolment Reference', classification: 'Aadhaar Reference Identifier', action: 'DETECT_ONLY', detect: { kind: 'label', re: L_VID }, priority: 40 },
     ],
-    defaults: { requesterName: 'KYC Verification Desk', purpose: 'Aadhaar-based identity KYC (privacy-preserving)', predicate: PREDICATE_SEAL_ONLY, thresholdValue: 0, unit: '' },
+    defaults: { requesterName: 'KYC Verification Desk', purpose: 'Age-gated KYC: prove age \u2265 18 from Aadhaar without revealing DOB', predicate: PREDICATE_GTE, thresholdValue: 18, unit: 'years' },
   },
   {
     id: 'pan',
