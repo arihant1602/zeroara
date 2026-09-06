@@ -9,7 +9,10 @@ export interface ExtractedSpatialToken {
   confidence?: number;
 }
 
-export type TargetAction = 'PROVE_AND_BURN' | 'DIRECT_BURN';
+// DIRECT_BURN: irreversible pixel redaction of a PII identifier (no proof).
+// PROVE_AND_BURN: redaction + a Groth16 numeric predicate proof.
+// DETECT_ONLY: located/flagged but not burned (no circuit/policy yet).
+export type TargetAction = 'PROVE_AND_BURN' | 'DIRECT_BURN' | 'DETECT_ONLY';
 export type TargetSource = 'OCR_AUTO' | 'MANUAL_USER';
 
 export interface ClassifiedTarget {
@@ -27,6 +30,8 @@ export interface ClassifiedTarget {
   action: TargetAction;
   source: TargetSource;
   confidence?: number;
+  /** Scenario field key this target maps to (e.g. 'aadhaar', 'pay'). */
+  fieldKey?: string;
 }
 
 export interface DocumentExtractionResult {

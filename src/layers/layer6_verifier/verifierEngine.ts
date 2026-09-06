@@ -65,34 +65,39 @@ export async function runEnterpriseAudit(
 
   // GATE 3: Poseidon Pedersen Witness Commitment Anchor
   const g3Start = performance.now();
-  const commit = pkg.zeroKnowledgeProof.poseidonCommitment;
+  const zk = pkg.zeroKnowledgeProof;
+  const sealOnly = !zk;
+  const commit = zk?.poseidonCommitment ?? '';
   const hasCommitment = Boolean(commit && commit.length > 10);
   gates.push({
     gateNumber: 3,
     gateName: 'Poseidon Pedersen Commitment Anchor',
-    passed: hasCommitment,
-    expectedValue: 'Valid BN254 Scalar Commitment',
-    actualValue: hasCommitment ? commit.slice(0, 14) + '...' : 'Missing',
-    details: hasCommitment
-      ? 'High-entropy scalar commitment anchored. Blinds private witness against leakage.'
-      : 'Invalid or missing Poseidon Pedersen commitment in proof envelope.',
+    passed: sealOnly ? true : hasCommitment,
+    expectedValue: sealOnly ? 'N/A · Seal-only' : 'Valid BN254 Scalar Commitment',
+    actualValue: sealOnly ? 'No numeric witness' : hasCommitment ? commit.slice(0, 14) + '...' : 'Missing',
+    details: sealOnly
+      ? 'Seal-only document category: no numeric witness commitment is expected.'
+      : hasCommitment
+        ? 'High-entropy scalar commitment anchored. Blinds private witness against leakage.'
+        : 'Invalid or missing Poseidon Pedersen commitment in proof envelope.',
     latencyMs: Math.max(1, Math.round(performance.now() - g3Start)),
   });
 
   // GATE 4: In-Browser Groth16 zk-SNARK Soundness Verification
-  const proofVerifyRes = await verifyIncomeProof(
-    pkg.zeroKnowledgeProof.proof,
-    pkg.zeroKnowledgeProof.publicSignals
-  );
+  const proofVerifyRes = zk
+    ? await verifyIncomeProof(zk.proof, zk.publicSignals)
+    : { isValid: true, latencyMs: 0 };
   gates.push({
     gateNumber: 4,
     gateName: 'Groth16 zk-SNARK Soundness Verification',
-    passed: proofVerifyRes.isValid,
-    expectedValue: 'Cryptographically Sound (BN128)',
-    actualValue: proofVerifyRes.isValid ? 'Sound Proof' : 'Invalid Constraints',
-    details: proofVerifyRes.isValid
-      ? 'Groth16 proof verified sound against BN128 verification key. Predicate satisfaction guaranteed.'
-      : 'FAIL: zk-SNARK pairing check failed. Proof is forged or constraints unsatisfied.',
+    passed: sealOnly ? true : proofVerifyRes.isValid,
+    expectedValue: sealOnly ? 'N/A · Seal-only' : 'Cryptographically Sound (BN128)',
+    actualValue: sealOnly ? 'No predicate proof' : proofVerifyRes.isValid ? 'Sound Proof' : 'Invalid Constraints',
+    details: sealOnly
+      ? 'No numeric predicate proof required for this document category (redaction is seal-bound only).'
+      : proofVerifyRes.isValid
+        ? 'Groth16 proof verified sound against BN128 verification key. Predicate satisfaction guaranteed.'
+        : 'FAIL: zk-SNARK pairing check failed. Proof is forged or constraints unsatisfied.',
     latencyMs: proofVerifyRes.latencyMs,
   });
 
@@ -101,8 +106,8 @@ export async function runEnterpriseAudit(
   const recomputedSeal = await computeMasterAuditSeal(
     pkg.sanitizedDocument.preimageSha256,
     pkg.sanitizedDocument.burnedBoundingBoxes,
-    pkg.zeroKnowledgeProof.poseidonCommitment,
-    pkg.zeroKnowledgeProof.proof
+    zk?.poseidonCommitment ?? '',
+    zk?.proof ?? null
   );
   const sealMatches = recomputedSeal.sealHex.toLowerCase() === pkg.masterAuditSeal.sealHex.toLowerCase();
   gates.push({
@@ -131,7 +136,9 @@ export async function runEnterpriseAudit(
       fileName: pkg.sourceDocument.fileName,
       requesterName: pkg.enterpriseRequirement.requesterName,
       predicate: pkg.enterpriseRequirement.predicate,
-      thresholdDisplay: `≥ $${pkg.enterpriseRequirement.thresholdValue.toLocaleString()} ${pkg.enterpriseRequirement.currency}`,
+      thresholdDisplay: sealOnly
+        ? 'N/A · Seal-only'
+        : `≥ ${pkg.enterpriseRequirement.thresholdValue.toLocaleString()} ${pkg.enterpriseRequirement.currency}`.trim(),
       masterSealHex: pkg.masterAuditSeal.sealHex,
     },
   };
@@ -151,15 +158,17 @@ export function createTamperedPackage(
       }
       break;
     case 'PROOF_MUTATION':
-      // Mutate one proof point bit
-      if (cloned.zeroKnowledgeProof.proof?.pi_a?.[0]) {
+      // Mutate one proof point bit (no-op for seal-only packages)
+      if (cloned.zeroKnowledgeProof?.proof?.pi_a?.[0]) {
         const p = cloned.zeroKnowledgeProof.proof.pi_a[0];
         cloned.zeroKnowledgeProof.proof.pi_a[0] = p.slice(0, -1) + (p.endsWith('0') ? '1' : '0');
       }
       break;
     case 'COMMITMENT_FORGERY':
-      // Mutate commitment
-      cloned.zeroKnowledgeProof.poseidonCommitment = '123456789012345678901234567890';
+      // Mutate commitment (no-op for seal-only packages)
+      if (cloned.zeroKnowledgeProof) {
+        cloned.zeroKnowledgeProof.poseidonCommitment = '123456789012345678901234567890';
+      }
       break;
     case 'DOCUMENT_HASH_CORRUPTION':
       // Corrupt document preimage hash
