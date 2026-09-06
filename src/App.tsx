@@ -18,6 +18,7 @@ import {
   type Groth16ProofResult,
   type MasterSealResult,
   type ZeroaraAuditPackage,
+  type SessionContext,
 } from './core/zeroara';
 import {
   UploadCloud,
@@ -40,6 +41,7 @@ import {
   Flame,
   Download,
   Eye,
+  EyeOff,
   Lock,
   Cpu,
   Fingerprint,
@@ -96,9 +98,13 @@ export function App() {
 
   // Phase 4 ZK Prover Engine State
   const [isProving, setIsProving] = useState(false);
+  const [isVerifyingAgain, setIsVerifyingAgain] = useState(false);
   const [proofResult, setProofResult] = useState<Groth16ProofResult | null>(null);
   const [proofVerified, setProofVerified] = useState<boolean | null>(null);
   const [proofVerifyLatencyMs, setProofVerifyLatencyMs] = useState<number | null>(null);
+  const [proverError, setProverError] = useState<string | null>(null);
+  const [invalidationMessage, setInvalidationMessage] = useState<string | null>(null);
+  const [showWitnessSecret, setShowWitnessSecret] = useState(false);
 
   // Phase 5 Master Audit Seal & Verifier Package State
   const [isSealing, setIsSealing] = useState(false);
@@ -240,25 +246,73 @@ export function App() {
     }
   };
 
+  // Invalidation handler for downstream cryptographic state
+  const invalidateDownstreamState = (reason?: string) => {
+    if (proofResult || masterSeal || auditPackage || proofVerified !== null) {
+      setProofResult(null);
+      setProofVerified(null);
+      setProofVerifyLatencyMs(null);
+      setMasterSeal(null);
+      setAuditPackage(null);
+      setAuditCheckResult(null);
+      if (reason) {
+        setInvalidationMessage(reason);
+      }
+    }
+  };
+
   // Execute Phase 4: Generate Client-Side Groth16 Zero-Knowledge Proof
   const executeZkProof = async () => {
-    const witness = detectedFields.find((f) => f.action === 'PROVE_AND_BURN') || detectedFields[0];
+    setProverError(null);
+    setInvalidationMessage(null);
+
+    const witness =
+      detectedFields.find((f) => f.action === 'PROVE_AND_BURN') ||
+      detectedFields.find((f) => typeof f.numericValue === 'number') ||
+      detectedFields[0];
     const actualVal = witness?.numericValue || 145000;
 
     setIsProving(true);
     try {
-      const res = await generateIncomeThresholdProof(actualVal, enterpriseSpec.thresholdValue);
-      setProofResult(res);
+      const sessionCtx: SessionContext = {
+        documentDigest: doc?.hashHex || '0x0000000000000000000000000000000000000000000000000000000000000000',
+        requesterName: enterpriseSpec.requesterName,
+        purpose: enterpriseSpec.purpose,
+        thresholdValue: enterpriseSpec.thresholdValue,
+        challengeNonce: enterpriseSpec.challengeNonce,
+      };
 
-      // Verify locally inside browser WebAssembly sandbox
-      const verify = await verifyIncomeProof(res.proof, res.publicSignals);
-      setProofVerified(verify.isValid);
-      setProofVerifyLatencyMs(verify.latencyMs);
+      const res = await generateIncomeThresholdProof(
+        actualVal,
+        enterpriseSpec.thresholdValue,
+        sessionCtx
+      );
+      setProofResult(res);
+      setProofVerified(res.verified);
+      setProofVerifyLatencyMs(res.verificationLatencyMs);
       setActivePhase(4);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Groth16 proving error:', err);
+      setProverError(err?.message || 'In-browser Groth16 proof generation failed.');
+      setProofResult(null);
+      setProofVerified(false);
     } finally {
       setIsProving(false);
+    }
+  };
+
+  // Execute Independent Phase 4 Verification
+  const executeVerifyAgain = async () => {
+    if (!proofResult) return;
+    setIsVerifyingAgain(true);
+    try {
+      const verify = await verifyIncomeProof(proofResult.proof, proofResult.publicSignals);
+      setProofVerified(verify.isValid);
+      setProofVerifyLatencyMs(verify.latencyMs);
+    } catch (err) {
+      setProofVerified(false);
+    } finally {
+      setIsVerifyingAgain(false);
     }
   };
 
@@ -316,6 +370,7 @@ export function App() {
           proof: proofResult.proof,
           poseidonCommitment: proofResult.commitment,
           blindingSalt: proofResult.blindingSalt,
+          sessionBinding: proofResult.sessionBinding,
           verified: proofVerified ?? true,
           verificationLatencyMs: proofVerifyLatencyMs ?? 25,
         },
@@ -391,6 +446,7 @@ export function App() {
 
     setDoc(newDoc);
     setRedactionResult(null);
+    invalidateDownstreamState('New document uploaded — previous proofs and seals cleared.');
     setViewMode('ORIGINAL');
     setActivePhase(1);
   };
@@ -414,6 +470,7 @@ export function App() {
 
     setDoc(newDoc);
     setRedactionResult(null);
+    invalidateDownstreamState('Sample document loaded — previous proofs and seals cleared.');
     setViewMode('ORIGINAL');
     setActivePhase(1);
   };
@@ -1233,6 +1290,7 @@ export function App() {
                           }}
                           onClick={() => {
                             setEnterpriseSpec((prev) => ({ ...prev, requesterName: p.req, targetField: p.field, thresholdValue: p.amount }));
+                            invalidateDownstreamState('Enterprise requirement preset changed — previous ZK proof invalidated. Please generate a new proof.');
                             if (extractedTokens.length > 0) {
                               setDetectedFields(classifyExtractedTargets(extractedTokens, p.amount));
                             }
@@ -1253,7 +1311,10 @@ export function App() {
                           className="neu-input"
                           style={{ padding: '10px 14px', fontSize: '0.8rem' }}
                           value={enterpriseSpec.requesterName}
-                          onChange={(e) => setEnterpriseSpec({ ...enterpriseSpec, requesterName: e.target.value })}
+                          onChange={(e) => {
+                            setEnterpriseSpec({ ...enterpriseSpec, requesterName: e.target.value });
+                            invalidateDownstreamState('Enterprise requester changed — session binding context invalidated.');
+                          }}
                         />
                       </div>
 
@@ -1271,6 +1332,7 @@ export function App() {
                           onChange={(e) => {
                             const val = Number(e.target.value);
                             setEnterpriseSpec({ ...enterpriseSpec, thresholdValue: val });
+                            invalidateDownstreamState('Enterprise threshold modified — previous ZK proof invalidated.');
                             if (extractedTokens.length > 0) {
                               setDetectedFields(classifyExtractedTargets(extractedTokens, val));
                             }
@@ -1283,7 +1345,10 @@ export function App() {
                       <span>Nonce: <strong className="mono">{enterpriseSpec.challengeNonce.substring(0, 14)}...</strong></span>
                       <button
                         type="button"
-                        onClick={regenerateNonce}
+                        onClick={() => {
+                          regenerateNonce();
+                          invalidateDownstreamState('Challenge nonce regenerated — session binding invalidated.');
+                        }}
                         style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--accent)', fontSize: '0.72rem', display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 600 }}
                       >
                         <RefreshCw size={11} />
@@ -1590,13 +1655,39 @@ export function App() {
               {/* PHASE 4 VIEW IN TELEMETRY */}
               {activePhase === 4 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                  {/* Invalidation Notice Card */}
+                  {invalidationMessage && (
+                    <div className="neu-well" style={{ padding: '12px 14px', borderLeft: '3px solid var(--accent)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.74rem', fontWeight: 700, color: 'var(--accent)' }}>
+                        <AlertTriangle size={14} />
+                        <span>SESSION PARAMETERS MODIFIED</span>
+                      </div>
+                      <div style={{ fontSize: '0.74rem', color: 'var(--fg-muted)' }}>
+                        {invalidationMessage}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Prover Constraint Failure Error Card */}
+                  {proverError && (
+                    <div className="neu-well" style={{ padding: '12px 14px', borderLeft: '3px solid #EF4444', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.74rem', fontWeight: 700, color: '#EF4444' }}>
+                        <AlertTriangle size={14} />
+                        <span>CIRCOM CONSTRAINT FAILURE</span>
+                      </div>
+                      <div style={{ fontSize: '0.74rem', color: 'var(--fg-primary)' }}>
+                        {proverError}
+                      </div>
+                    </div>
+                  )}
+
                   {/* Private Witness Claim & Predicate Evaluation */}
                   <div className="neu-well" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                         <Lock size={15} style={{ color: 'var(--accent)' }} />
                         <span style={{ fontSize: '0.78rem', fontWeight: 800, color: 'var(--fg-primary)' }}>
-                          Confidential Witness & Enterprise Predicate
+                          Confidential Witness &amp; Enterprise Predicate
                         </span>
                       </div>
                       <span className="neu-claim-badge">
@@ -1616,15 +1707,31 @@ export function App() {
                         </span>
                       </div>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <span style={{ color: 'var(--fg-muted)' }}>Private Witness in RAM:</span>
-                        <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)' }}>
-                          USD {(witnessTarget?.numericValue || 145000).toLocaleString()} (NEVER EXPOSED)
+                        <span style={{ color: 'var(--fg-muted)' }}>Private Secret in RAM:</span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', letterSpacing: showWitnessSecret ? 'normal' : '2px' }}>
+                            {showWitnessSecret ? `USD ${(witnessTarget?.numericValue || 145000).toLocaleString()}` : '██████████'}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setShowWitnessSecret(!showWitnessSecret)}
+                            style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-muted)', display: 'flex', alignItems: 'center', padding: '2px' }}
+                            title={showWitnessSecret ? 'Mask secret' : 'Reveal secret locally'}
+                          >
+                            {showWitnessSecret ? <EyeOff size={13} /> : <Eye size={13} />}
+                          </button>
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span style={{ color: 'var(--fg-muted)' }}>Document Root Binding:</span>
+                        <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.72rem', color: 'var(--fg-muted)' }}>
+                          {doc ? `${doc.hashHex.slice(0, 10)}...${doc.hashHex.slice(-6)}` : 'Awaiting Doc'}
                         </span>
                       </div>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <span style={{ color: 'var(--fg-muted)' }}>Predicate Evaluation:</span>
-                        <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent-secondary)' }}>
-                          CONDITION SATISFIED (TRUE)
+                        <span style={{ color: 'var(--fg-muted)' }}>Challenge Nonce:</span>
+                        <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.72rem', color: 'var(--fg-muted)' }}>
+                          {enterpriseSpec.challengeNonce.slice(0, 14)}...
                         </span>
                       </div>
                     </div>
@@ -1668,9 +1775,37 @@ export function App() {
                         </div>
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', fontSize: '0.72rem', fontFamily: 'var(--font-mono)', color: 'var(--fg-muted)' }}>
                           <div>Prover Latency: {proofResult.durationMs} ms</div>
-                          <div>Curve: {proofResult.proof.curve}</div>
+                          <div>Curve: {proofResult.curve}</div>
                           <div>Blinding Salt: {proofResult.blindingSalt.slice(0, 16)}...</div>
                           <div>Public Signals: {proofResult.publicSignals.length}</div>
+                        </div>
+                      </div>
+
+                      {/* Session Binding Context Card */}
+                      <div className="neu-well" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <span style={{ fontSize: '0.76rem', fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--accent)' }}>
+                            SESSION CONTEXT BINDING DIGEST:
+                          </span>
+                          <span className="neu-hash-pill">SHA-256 LOAD-SEAL</span>
+                        </div>
+                        <div
+                          style={{
+                            fontFamily: 'var(--font-mono)',
+                            fontSize: '0.76rem',
+                            lineHeight: '1.5',
+                            color: 'var(--fg-primary)',
+                            backgroundColor: 'var(--bg-surface)',
+                            boxShadow: 'var(--shadow-inset-sm)',
+                            padding: '10px 12px',
+                            borderRadius: '10px',
+                            wordBreak: 'break-all',
+                          }}
+                        >
+                          {proofResult.sessionBinding}
+                        </div>
+                        <div style={{ fontSize: '0.7rem', fontFamily: 'var(--font-mono)', color: 'var(--fg-muted)' }}>
+                          Binds Document Root Digest, Enterprise Requester, Threshold, Nonce &amp; Poseidon Commitment.
                         </div>
                       </div>
 
@@ -1717,23 +1852,35 @@ export function App() {
                         </div>
 
                         {/* Local In-Browser Verification Soundness Status */}
-                        <div className="neu-verified-well">
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.78rem', color: 'var(--accent-secondary)', fontWeight: 700 }}>
-                            <CheckCircle2 size={16} />
-                            <span>Proof Verified Sound in Local WASM Sandbox ({proofVerifyLatencyMs ?? 25}ms)</span>
+                        {proofVerified ? (
+                          <div className="neu-verified-well">
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.78rem', color: 'var(--accent-secondary)', fontWeight: 700 }}>
+                              <CheckCircle2 size={16} />
+                              <span>Proof Verified Sound in Local WASM Sandbox ({proofVerifyLatencyMs ?? 25}ms)</span>
+                            </div>
+                            <span className="neu-claim-badge" style={{ color: 'var(--accent-secondary)' }}>
+                              VALIDATED
+                            </span>
                           </div>
-                          <span className="neu-claim-badge" style={{ color: 'var(--accent-secondary)' }}>
-                            VALIDATED
-                          </span>
-                        </div>
+                        ) : (
+                          <div className="neu-well" style={{ padding: '10px 14px', borderLeft: '3px solid #EF4444', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.78rem', color: '#EF4444', fontWeight: 700 }}>
+                              <AlertTriangle size={16} />
+                              <span>Cryptographic Verification Failed</span>
+                            </div>
+                            <span className="neu-claim-badge" style={{ color: '#EF4444' }}>
+                              INVALID
+                            </span>
+                          </div>
+                        )}
                       </div>
 
-                      {/* Primary CTA: Proceed to Master Audit Seal in Phase 5 */}
+                      {/* Action Buttons: Primary Proceed + Verify Again + Regenerate */}
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                         <button
                           className="neu-btn-primary"
                           onClick={executeMasterSeal}
-                          disabled={isSealing}
+                          disabled={isSealing || !proofVerified}
                           style={{ width: '100%', padding: '13px', fontSize: '0.88rem', gap: '8px' }}
                         >
                           <Fingerprint size={16} className={isSealing ? 'spin' : ''} />
@@ -1741,15 +1888,29 @@ export function App() {
                           <ArrowRight size={16} />
                         </button>
 
-                        <button
-                          className="neu-btn-secondary"
-                          onClick={executeZkProof}
-                          disabled={isProving}
-                          style={{ width: '100%', padding: '9px', fontSize: '0.78rem', gap: '6px' }}
-                        >
-                          <RefreshCw size={12} className={isProving ? 'spin' : ''} />
-                          <span>Re-generate Proof with New Entropy Salt</span>
-                        </button>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                          <button
+                            className="neu-btn-secondary"
+                            onClick={executeVerifyAgain}
+                            disabled={isVerifyingAgain}
+                            style={{ padding: '9px 12px', fontSize: '0.76rem', gap: '6px', justifyContent: 'center' }}
+                            title="Run independent Groth16 cryptographic verification procedure"
+                          >
+                            <CheckCircle2 size={13} className={isVerifyingAgain ? 'spin' : ''} style={{ color: 'var(--accent-secondary)' }} />
+                            <span>{isVerifyingAgain ? 'Verifying...' : 'Verify Again'}</span>
+                          </button>
+
+                          <button
+                            className="neu-btn-secondary"
+                            onClick={executeZkProof}
+                            disabled={isProving}
+                            style={{ padding: '9px 12px', fontSize: '0.76rem', gap: '6px', justifyContent: 'center' }}
+                            title="Re-run witness evaluation with fresh scalar salt"
+                          >
+                            <RefreshCw size={12} className={isProving ? 'spin' : ''} />
+                            <span>Re-Prove (Fresh Salt)</span>
+                          </button>
+                        </div>
                       </div>
                     </>
                   )}
