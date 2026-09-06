@@ -385,6 +385,12 @@ export function App() {
         protocol: 'Zeroara Provable Redaction Protocol',
         version: '1.0.0',
         generatedAt: new Date().toISOString(),
+        scenario: {
+          id: 'salary_slip',
+          label: 'Salary Slip',
+          category: 'Financial Document',
+        },
+        redactionMode: 'PROOF_BACKED',
         sourceDocument: {
           fileName: doc.fileName,
           fileSizeBytes: doc.fileSizeBytes,
@@ -405,14 +411,21 @@ export function App() {
           })),
           textStreamsDetected: redactionResult.textStreamCount,
         },
+        redactedFields: detectedFields.map((field) => ({
+          label: field.label,
+          classification: field.classification,
+          action: field.action,
+        })),
         enterpriseRequirement: {
           requesterName: enterpriseSpec.requesterName,
           purpose: enterpriseSpec.purpose,
+          documentCategory: 'Salary Slip',
           targetField: enterpriseSpec.targetField,
           predicate: enterpriseSpec.predicate,
           thresholdValue: enterpriseSpec.thresholdValue,
           currency: enterpriseSpec.currency,
           challengeNonce: enterpriseSpec.challengeNonce,
+          requiredRedactionFields: detectedFields.map((field) => field.label),
         },
         zeroKnowledgeProof: {
           curve: proofResult.proof.curve,
