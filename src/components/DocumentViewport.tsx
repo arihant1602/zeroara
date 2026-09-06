@@ -1,24 +1,87 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 import { StepNumber, PipelineState, PipelineTelemetry } from '../hooks/usePipeline';
-import { Layers } from 'lucide-react';
+import { renderPdfBytesToCanvas, renderImageFileToCanvas } from '../core/zeroara';
+import { Layers, UploadCloud, RefreshCw } from 'lucide-react';
 
 interface DocumentViewportProps {
   activeStep: StepNumber;
   pipelineState: PipelineState;
   telemetry: PipelineTelemetry;
+  onUploadFile: (file: File) => void;
+  onLoadSample: () => void;
 }
 
 export const DocumentViewport: React.FC<DocumentViewportProps> = ({
   activeStep,
   pipelineState,
   telemetry,
+  onUploadFile,
+  onLoadSample,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+
+  // File drag & drop handling
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = () => {
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      onUploadFile(e.dataTransfer.files[0]);
+    }
+  };
+
+  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      onUploadFile(e.target.files[0]);
+    }
+  };
 
   // High-fidelity document rendering on standard HTML5 canvas
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+
+    // Check if uploaded file is a PDF with rawBytes
+    if (
+      telemetry.ingest?.isUploadedFile &&
+      telemetry.ingest.rawBytes &&
+      telemetry.ingest.mimeType === 'application/pdf'
+    ) {
+      renderPdfBytesToCanvas(telemetry.ingest.rawBytes, canvas).catch((err) => {
+        console.warn('PDF canvas render fallback to standard certificate:', err);
+        renderStandardCertificate(canvas);
+      });
+      return;
+    }
+
+    // Check if uploaded file is an image
+    if (
+      telemetry.ingest?.isUploadedFile &&
+      telemetry.ingest.uploadedFile &&
+      telemetry.ingest.mimeType.startsWith('image/')
+    ) {
+      renderImageFileToCanvas(telemetry.ingest.uploadedFile, canvas).catch((err) => {
+        console.warn('Image render fallback:', err);
+        renderStandardCertificate(canvas);
+      });
+      return;
+    }
+
+    // Otherwise render standard certificate layout
+    renderStandardCertificate(canvas);
+  }, [activeStep, pipelineState, telemetry]);
+
+  const renderStandardCertificate = (canvas: HTMLCanvasElement) => {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
@@ -98,13 +161,11 @@ export const DocumentViewport: React.FC<DocumentViewportProps> = ({
     ctx.fillText('I hereby attest under penalty of perjury that the verified credentials meet regulatory standards.', 40, y);
 
     // Stage-specific Overlays:
-    // Stage 1: Clean document (already rendered)
-
     // Stage 2: Visible coordinate bounding boxes with green/accent outlines
     if (activeStep === 2) {
       // SSN bounding box
       ctx.save();
-      ctx.strokeStyle = '#0D9488'; // teal accent
+      ctx.strokeStyle = '#0D9488';
       ctx.lineWidth = 2;
       ctx.setLineDash([4, 3]);
       ctx.strokeRect(ssnTextX - 4, ssnTextY - 15, 96, 20);
@@ -119,7 +180,7 @@ export const DocumentViewport: React.FC<DocumentViewportProps> = ({
 
       // Income bounding box
       ctx.save();
-      ctx.strokeStyle = '#EA580C'; // orange accent
+      ctx.strokeStyle = '#EA580C';
       ctx.lineWidth = 2;
       ctx.setLineDash([4, 3]);
       ctx.strokeRect(incomeTextX - 4, incomeTextY - 15, 104, 20);
@@ -168,7 +229,7 @@ export const DocumentViewport: React.FC<DocumentViewportProps> = ({
 
       // Stamped seal text
       const shortSeal = telemetry.seal?.masterSeal?.sealHex.substring(0, 8) || '4f8a9e21';
-      const sealTag = `█[SEAL: #0x${shortSeal} | >= $100k]█`;
+      const sealTag = telemetry.seal?.sealTag || `█[SEAL: #0x${shortSeal} | >= $100k]█`;
 
       ctx.fillStyle = activeStep === 5 ? '#FB923C' : '#7DD3FC';
       ctx.font = 'bold 10.5px "JetBrains Mono", monospace';
@@ -191,78 +252,186 @@ export const DocumentViewport: React.FC<DocumentViewportProps> = ({
         ctx.fillText(`Digest: ${fullSeal.substring(0, 48)}...`, 36, height - 26);
       }
     }
-  }, [activeStep, pipelineState, telemetry]);
+  };
 
   const stepTitle = {
-    1: 'Stage 1: Clean Sample Document Ingested',
+    1: 'Stage 1: Document Ingested & SHA-256 Digest Computed',
     2: 'Stage 2: OCR Bounding Coordinate Detection',
     3: 'Stage 3: Physical Black Pixel Burn & Raster Flattening',
     4: 'Stage 4: Groth16 ZK Witness Commitment',
     5: 'Stage 5: Cryptographic Master Audit Seal Stamped',
   }[activeStep];
 
-  const stepBadgeColor = {
-    1: 'var(--fg-muted)',
-    2: 'var(--accent-secondary)',
-    3: 'var(--accent-rose)',
-    4: 'var(--accent)',
-    5: 'var(--accent)',
-  }[activeStep];
+  const hasDocument = !!telemetry.ingest;
 
   return (
     <div className="neu-card" style={{ width: '100%', padding: '20px 24px', gap: '14px' }}>
-      {/* Viewport Header */}
+      {/* Hidden File Input */}
+      <input
+        type="file"
+        ref={fileInputRef}
+        onChange={handleFileInputChange}
+        accept=".pdf,.png,.jpg,.jpeg,.txt"
+        style={{ display: 'none' }}
+      />
+
+      {/* Viewport Header with File Details and Replace Action */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <Layers size={18} style={{ color: 'var(--accent)' }} />
           <span style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: '0.96rem' }}>
             Document Viewport
           </span>
+          {hasDocument && (
+            <span
+              style={{
+                fontSize: '0.74rem',
+                fontFamily: 'var(--font-mono)',
+                color: 'var(--fg-muted)',
+                backgroundColor: 'var(--bg-surface)',
+                boxShadow: 'var(--shadow-inset-sm)',
+                padding: '3px 10px',
+                borderRadius: 'var(--radius-pill)',
+              }}
+            >
+              {telemetry.ingest?.fileName} ({(telemetry.ingest!.fileSizeBytes / 1024).toFixed(1)} KB)
+            </span>
+          )}
         </div>
 
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          {hasDocument && (
+            <button
+              className="neu-pill-btn"
+              style={{ fontSize: '0.74rem', padding: '5px 12px', display: 'flex', alignItems: 'center', gap: '4px' }}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <RefreshCw size={12} />
+              <span>Change Document</span>
+            </button>
+          )}
+
+          <div
+            style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: '0.72rem',
+              fontWeight: 700,
+              padding: '4px 12px',
+              borderRadius: 'var(--radius-pill)',
+              backgroundColor: 'var(--bg-surface)',
+              boxShadow: 'var(--shadow-inset-sm)',
+              color: 'var(--accent)',
+            }}
+          >
+            {hasDocument ? stepTitle : 'Awaiting Document Ingest'}
+          </div>
+        </div>
+      </div>
+
+      {/* Main Viewport Content: Dropzone if empty, Canvas if loaded */}
+      {!hasDocument ? (
         <div
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+          onClick={() => fileInputRef.current?.click()}
+          className="neu-well-deep"
           style={{
-            fontFamily: 'var(--font-mono)',
-            fontSize: '0.72rem',
-            fontWeight: 700,
-            padding: '4px 12px',
-            borderRadius: 'var(--radius-pill)',
-            backgroundColor: 'var(--bg-surface)',
-            boxShadow: 'var(--shadow-inset-sm)',
-            color: stepBadgeColor,
+            minHeight: '440px',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            textAlign: 'center',
+            cursor: 'pointer',
+            padding: '40px 24px',
+            border: isDragging ? '2px dashed var(--accent)' : '2px dashed #C4CCD8',
+            borderRadius: '24px',
+            transition: 'all 250ms ease',
+            backgroundColor: isDragging ? 'rgba(234, 88, 12, 0.05)' : 'var(--bg-surface)',
+            gap: '16px',
           }}
         >
-          {stepTitle}
+          <div
+            style={{
+              width: '68px',
+              height: '68px',
+              borderRadius: '50%',
+              backgroundColor: 'var(--bg-surface)',
+              boxShadow: 'var(--shadow-extruded)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: 'var(--accent)',
+            }}
+          >
+            <UploadCloud size={34} />
+          </div>
+
+          <div style={{ maxWidth: '420px' }}>
+            <h4 style={{ fontFamily: 'var(--font-display)', fontSize: '1.15rem', fontWeight: 800, color: 'var(--fg-primary)' }}>
+              Drop your document here, or click to browse
+            </h4>
+            <p style={{ fontSize: '0.84rem', color: 'var(--fg-muted)', marginTop: '6px', lineHeight: '1.5' }}>
+              Accepts <strong>PDF, PNG, JPG, or TXT</strong>. Executes 100% inside your browser RAM. Preimage SHA-256 hash is computed instantly with zero network calls.
+            </p>
+          </div>
+
+          <div style={{ display: 'flex', gap: '10px', marginTop: '8px' }}>
+            <button
+              type="button"
+              className="neu-btn-primary"
+              style={{ fontSize: '0.84rem', padding: '10px 20px' }}
+              onClick={(e) => {
+                e.stopPropagation();
+                fileInputRef.current?.click();
+              }}
+            >
+              Browse Local Files
+            </button>
+
+            <button
+              type="button"
+              className="neu-btn-secondary"
+              style={{ fontSize: '0.84rem', padding: '10px 18px' }}
+              onClick={(e) => {
+                e.stopPropagation();
+                onLoadSample();
+              }}
+            >
+              Or Load Sample Certificate
+            </button>
+          </div>
         </div>
-      </div>
-
-      {/* Canvas Viewport Well */}
-      <div
-        style={{
-          width: '100%',
-          overflowX: 'auto',
-          display: 'flex',
-          justifyContent: 'center',
-          alignItems: 'center',
-          padding: '12px',
-          backgroundColor: 'var(--bg-surface)',
-          boxShadow: 'var(--shadow-inset-deep)',
-          borderRadius: 'var(--radius-btn)',
-        }}
-      >
-        <canvas
-          ref={canvasRef}
+      ) : (
+        <div
           style={{
-            maxWidth: '100%',
-            height: 'auto',
-            borderRadius: '12px',
-            boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
-            display: 'block',
+            width: '100%',
+            overflowX: 'auto',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            padding: '12px',
+            backgroundColor: 'var(--bg-surface)',
+            boxShadow: 'var(--shadow-inset-deep)',
+            borderRadius: 'var(--radius-btn)',
+            position: 'relative',
           }}
-        />
-      </div>
+        >
+          <canvas
+            ref={canvasRef}
+            style={{
+              maxWidth: '100%',
+              height: 'auto',
+              borderRadius: '12px',
+              boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
+              display: 'block',
+            }}
+          />
+        </div>
+      )}
 
-      {/* Viewport Micro-Footer Info */}
+      {/* Viewport Micro-Footer Info & Proceed CTA if on Stage 1 */}
       <div
         style={{
           display: 'flex',
@@ -272,11 +441,13 @@ export const DocumentViewport: React.FC<DocumentViewportProps> = ({
           fontFamily: 'var(--font-mono)',
           color: 'var(--fg-muted)',
           padding: '4px 6px',
+          flexWrap: 'wrap',
+          gap: '8px',
         }}
       >
         <span>Resolution: 640 × 500 px (300 DPI)</span>
-        <span>Text Stream: {activeStep >= 3 ? 'Stripped / Eradicated' : 'Active'}</span>
-        <span>Redaction: {activeStep >= 3 ? '100% Solid Black Pixel Fill' : activeStep === 2 ? 'Outlines Active' : 'None'}</span>
+        <span>Local Browser RAM Isolate: Active</span>
+        <span>Egress: 0 bytes</span>
       </div>
     </div>
   );

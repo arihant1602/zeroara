@@ -4,6 +4,7 @@ import { PipelineStepper } from './components/PipelineStepper';
 import { DocumentViewport } from './components/DocumentViewport';
 import { TelemetryInspector } from './components/TelemetryInspector';
 import { VerificationGate } from './components/VerificationGate';
+import { EnterpriseSpecModal } from './components/EnterpriseSpecModal';
 
 export function App() {
   const {
@@ -12,19 +13,26 @@ export function App() {
     completedSteps,
     telemetry,
     networkActivity,
+    enterprisePolicy,
+    enterpriseModalOpen,
     verificationModalOpen,
     verificationResult,
     isVerifying,
+    uploadDocument,
     loadSampleDocument,
+    runPipelineFromIngest,
+    updateEnterprisePolicy,
     selectStep,
     runEnterpriseVerification,
     downloadRedactedPdf,
     exportAuditReceipt,
     resetPipeline,
+    setEnterpriseModalOpen,
     setVerificationModalOpen,
   } = usePipeline();
 
   const isSealed = pipelineState === 'SEALED';
+  const hasDocument = !!telemetry.ingest;
 
   return (
     <div className="app-shell">
@@ -40,6 +48,8 @@ export function App() {
             networkActivity={networkActivity}
             onLoadSample={loadSampleDocument}
             onReset={resetPipeline}
+            enterprisePolicy={enterprisePolicy}
+            onOpenEnterpriseModal={() => setEnterpriseModalOpen(true)}
           />
 
           {/* 2. Split-Pane Workspace (Side-by-Side Left & Right Panels) */}
@@ -51,20 +61,26 @@ export function App() {
               alignItems: 'stretch',
             }}
           >
-            {/* Left Panel: Document Viewport (PDF / Canvas) */}
+            {/* Left Panel: Document Viewport (PDF / Canvas / Dropzone) */}
             <DocumentViewport
               activeStep={activeStep}
               pipelineState={pipelineState}
               telemetry={telemetry}
+              onUploadFile={uploadDocument}
+              onLoadSample={loadSampleDocument}
             />
 
             {/* Right Panel: Cryptographic Telemetry Inspector */}
             <TelemetryInspector
               activeStep={activeStep}
               telemetry={telemetry}
+              enterprisePolicy={enterprisePolicy}
+              onOpenEnterpriseModal={() => setEnterpriseModalOpen(true)}
+              onProceedToNextStep={() => runPipelineFromIngest()}
               onDownloadPdf={downloadRedactedPdf}
               onExportReceipt={exportAuditReceipt}
               onSelectStep={selectStep}
+              hasDocument={hasDocument}
             />
           </div>
 
@@ -76,6 +92,14 @@ export function App() {
             verificationResult={verificationResult}
             isOpen={verificationModalOpen}
             onClose={() => setVerificationModalOpen(false)}
+          />
+
+          {/* 4. Enterprise Verification Simulator Modal */}
+          <EnterpriseSpecModal
+            isOpen={enterpriseModalOpen}
+            onClose={() => setEnterpriseModalOpen(false)}
+            policy={enterprisePolicy}
+            onSavePolicy={updateEnterprisePolicy}
           />
         </div>
       </main>

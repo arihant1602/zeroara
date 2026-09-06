@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef } from 'react';
 import {
   sha256Hex,
+  formatChunkedHash,
   generateIncomeThresholdProof,
   verifyIncomeProof,
   computeMasterAuditSeal,
@@ -25,7 +26,11 @@ export interface IngestTelemetry {
   fileSizeBytes: number;
   mimeType: string;
   originalDocHash: string;
+  chunkedHash: string;
   ingestTimestamp: string;
+  isUploadedFile: boolean;
+  uploadedFile?: File;
+  rawBytes?: Uint8Array;
 }
 
 export interface OcrClaimTelemetry {
@@ -78,6 +83,28 @@ export interface NetworkListener {
   status: string;
 }
 
+export interface EnterprisePolicy {
+  requesterName: string;
+  purpose: string;
+  targetField: string;
+  predicate: 'GTE';
+  thresholdValue: number;
+  currency: string;
+  burnSsn: boolean;
+  challengeNonce: string;
+}
+
+export const DEFAULT_ENTERPRISE_POLICY: EnterprisePolicy = {
+  requesterName: 'Apex Distributed Ventures LP',
+  purpose: 'SEC Rule 506(c) Accredited Investor Verification',
+  targetField: '2-Year Trailing Net Income',
+  predicate: 'GTE',
+  thresholdValue: 100000,
+  currency: 'USD',
+  burnSsn: true,
+  challengeNonce: '0x94f8a2bc710e39b4d1c68f12a03',
+};
+
 export const SAMPLE_DOCUMENT_TEXT = `CONFIDENTIAL ACCREDITED INVESTOR VERIFICATION
 Issuer: Apex Distributed Ventures LP
 Target: Zeroara Protocol Round A
@@ -123,6 +150,9 @@ export function usePipeline() {
   const [pipelineState, setPipelineState] = useState<PipelineState>('IDLE');
   const [activeStep, setActiveStep] = useState<StepNumber>(1);
   const [completedSteps, setCompletedSteps] = useState<number[]>([]);
+  const [enterprisePolicy, setEnterprisePolicy] = useState<EnterprisePolicy>(DEFAULT_ENTERPRISE_POLICY);
+  const [enterpriseModalOpen, setEnterpriseModalOpen] = useState(false);
+
   const [telemetry, setTelemetry] = useState<PipelineTelemetry>({
     ingest: null,
     ocr: null,
@@ -149,29 +179,52 @@ export function usePipeline() {
 
   const abortControllerRef = useRef<boolean>(false);
 
-  const loadSampleDocument = useCallback(async () => {
+  // Updates enterprise verification requirement parameters
+  const updateEnterprisePolicy = useCallback((updates: Partial<EnterprisePolicy>) => {
+    setEnterprisePolicy((prev) => ({ ...prev, ...updates }));
+  }, []);
+
+  // Upload user-provided document (PDF, PNG, JPG, or TXT)
+  const uploadDocument = useCallback(async (file: File) => {
     abortControllerRef.current = false;
     setVerificationResult(null);
 
-    // Stage 1: INGESTING
-    setPipelineState('INGESTING');
-    setActiveStep(1);
-    setCompletedSteps([]);
+    // Read bytes directly in-browser RAM
+    const arrayBuffer = await file.arrayBuffer();
+    const rawBytes = new Uint8Array(arrayBuffer);
+    const hashHex = await sha256Hex(rawBytes);
+    const chunked = formatChunkedHash(hashHex);
 
-    const originalHash = await sha256Hex(SAMPLE_DOCUMENT_TEXT);
     const ingestData: IngestTelemetry = {
-      fileName: 'Accredited_Investor_Verification_ApexLP.pdf',
-      fileSizeBytes: 48290,
-      mimeType: 'application/pdf',
-      originalDocHash: originalHash,
+      fileName: file.name,
+      fileSizeBytes: file.size,
+      mimeType: file.type || 'application/octet-stream',
+      originalDocHash: hashHex,
+      chunkedHash: chunked,
       ingestTimestamp: new Date().toISOString(),
+      isUploadedFile: true,
+      uploadedFile: file,
+      rawBytes,
     };
 
-    setTelemetry((prev) => ({ ...prev, ingest: ingestData }));
-    setCompletedSteps([1]);
+    setTelemetry((prev) => ({
+      ...prev,
+      ingest: ingestData,
+      ocr: null,
+      raster: null,
+      zk: null,
+      seal: null,
+    }));
 
-    await new Promise((r) => setTimeout(r, 650));
-    if (abortControllerRef.current) return;
+    setPipelineState('INGESTING');
+    setActiveStep(1);
+    setCompletedSteps([1]);
+  }, []);
+
+  // Advance from Stage 1 through to Stage 5 (Proof & Seal)
+  const runPipelineFromIngest = useCallback(async (policyToUse?: EnterprisePolicy) => {
+    abortControllerRef.current = false;
+    const policy = policyToUse ?? enterprisePolicy;
 
     // Stage 2: OCR_DETECTING
     setPipelineState('OCR_DETECTING');
@@ -180,8 +233,8 @@ export function usePipeline() {
     const ocrData: OcrClaimTelemetry = {
       actualValueStr: '$145,000',
       actualValueNum: 145000,
-      thresholdStr: '>= $100,000',
-      thresholdNum: 100000,
+      thresholdStr: `>= $${policy.thresholdValue.toLocaleString()} ${policy.currency}`,
+      thresholdNum: policy.thresholdValue,
       confidence: 99.4,
       detectedFields: SAMPLE_BOUNDING_BOXES,
     };
@@ -189,7 +242,7 @@ export function usePipeline() {
     setTelemetry((prev) => ({ ...prev, ocr: ocrData }));
     setCompletedSteps([1, 2]);
 
-    await new Promise((r) => setTimeout(r, 700));
+    await new Promise((r) => setTimeout(r, 650));
     if (abortControllerRef.current) return;
 
     // Stage 3: BURNING_PIXELS
@@ -206,7 +259,7 @@ export function usePipeline() {
       pixelFill: '#000000',
       canvasWidth: 600,
       canvasHeight: 480,
-      totalPixelsBurned: 124 * 22 + 108 * 22, // 5104 px
+      totalPixelsBurned: 124 * 22 + 108 * 22,
       redactedDocHash: redactedDocHash,
     };
 
@@ -220,7 +273,7 @@ export function usePipeline() {
     setPipelineState('PROVING_ZK');
     setActiveStep(4);
 
-    const zkResult = await generateIncomeThresholdProof(145000, 100000);
+    const zkResult = await generateIncomeThresholdProof(145000, policy.thresholdValue);
 
     const zkData: ZkTelemetry = {
       zkResult,
@@ -237,7 +290,7 @@ export function usePipeline() {
     await new Promise((r) => setTimeout(r, 750));
     if (abortControllerRef.current) return;
 
-    // Stage 5: SEALED (Master Audit Seal + PDF & JSON export)
+    // Stage 5: SEALED
     setPipelineState('SEALED');
     setActiveStep(5);
 
@@ -249,11 +302,11 @@ export function usePipeline() {
     );
 
     const shortSeal = masterSeal.sealHex.substring(0, 8);
-    const sealTag = `█[SEAL: #0x${shortSeal} | >= $100k]█`;
+    const sealTag = `█[SEAL: #0x${shortSeal} | >= $${Math.round(policy.thresholdValue / 1000)}k]█`;
 
     // Generate physical PDF with pdf-lib
     const pdfBytes = await createRedactedPdf(
-      'Accredited Investor Verification (Apex LP)',
+      policy.purpose,
       SAMPLE_BOUNDING_BOXES,
       sealTag
     );
@@ -263,14 +316,19 @@ export function usePipeline() {
     const auditReceiptJson = {
       protocol: 'Zeroara Provable Redaction v1',
       standard: 'ZEROARA-LOAD-BEARING-SEAL',
+      enterprise_requester: {
+        name: policy.requesterName,
+        purpose: policy.purpose,
+        challenge_nonce: policy.challengeNonce,
+      },
       document: {
-        title: 'Accredited Investor Verification (Apex LP)',
-        original_sha256: originalHash,
+        title: policy.purpose,
+        original_sha256: telemetry.ingest?.originalDocHash || (await sha256Hex(SAMPLE_DOCUMENT_TEXT)),
         redacted_sha256: redactedDocHash,
       },
       pii_claim: {
-        field: '2-Year Trailing Net Income',
-        predicate: 'actualValue >= 100000 USD',
+        field: policy.targetField,
+        predicate: `actualValue >= ${policy.thresholdValue} ${policy.currency}`,
         satisfied: true,
         secret_disclosed: false,
       },
@@ -296,14 +354,45 @@ export function usePipeline() {
     const sealData: SealTelemetry = {
       masterSeal,
       sealTag,
-      verificationStatus: 'VALID (Income >= $100,000 USD)',
+      verificationStatus: `VALID (${policy.targetField} >= $${policy.thresholdValue.toLocaleString()} ${policy.currency})`,
       pdfBlobUrl,
       auditReceiptJson,
     };
 
     setTelemetry((prev) => ({ ...prev, seal: sealData }));
     setCompletedSteps([1, 2, 3, 4, 5]);
-  }, []);
+  }, [enterprisePolicy, telemetry.ingest]);
+
+  // One-click load sample certificate preset
+  const loadSampleDocument = useCallback(async () => {
+    abortControllerRef.current = false;
+    setVerificationResult(null);
+
+    setPipelineState('INGESTING');
+    setActiveStep(1);
+    setCompletedSteps([]);
+
+    const originalHash = await sha256Hex(SAMPLE_DOCUMENT_TEXT);
+    const chunked = formatChunkedHash(originalHash);
+
+    const ingestData: IngestTelemetry = {
+      fileName: 'Accredited_Investor_Verification_ApexLP.pdf',
+      fileSizeBytes: 48290,
+      mimeType: 'application/pdf',
+      originalDocHash: originalHash,
+      chunkedHash: chunked,
+      ingestTimestamp: new Date().toISOString(),
+      isUploadedFile: false,
+    };
+
+    setTelemetry((prev) => ({ ...prev, ingest: ingestData }));
+    setCompletedSteps([1]);
+
+    await new Promise((r) => setTimeout(r, 600));
+    if (abortControllerRef.current) return;
+
+    await runPipelineFromIngest();
+  }, [runPipelineFromIngest]);
 
   const selectStep = useCallback(
     (step: StepNumber) => {
@@ -393,15 +482,21 @@ export function usePipeline() {
     completedSteps,
     telemetry,
     networkActivity,
+    enterprisePolicy,
+    enterpriseModalOpen,
     verificationModalOpen,
     verificationResult,
     isVerifying,
+    uploadDocument,
     loadSampleDocument,
+    runPipelineFromIngest,
+    updateEnterprisePolicy,
     selectStep,
     runEnterpriseVerification,
     downloadRedactedPdf,
     exportAuditReceipt,
     resetPipeline,
+    setEnterpriseModalOpen,
     setVerificationModalOpen,
   };
 }

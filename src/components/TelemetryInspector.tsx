@@ -1,22 +1,32 @@
-import React from 'react';
-import { StepNumber, PipelineTelemetry } from '../hooks/usePipeline';
-import { Download, FileJson, Terminal, Hash, Key, Cpu, ShieldCheck } from 'lucide-react';
+import React, { useState } from 'react';
+import { StepNumber, PipelineTelemetry, EnterprisePolicy } from '../hooks/usePipeline';
+import { Download, FileJson, Terminal, Hash, Key, Cpu, ShieldCheck, Copy, Check, Sliders, ArrowRight } from 'lucide-react';
 
 interface TelemetryInspectorProps {
   activeStep: StepNumber;
   telemetry: PipelineTelemetry;
+  enterprisePolicy: EnterprisePolicy;
+  onOpenEnterpriseModal: () => void;
+  onProceedToNextStep: () => void;
   onDownloadPdf: () => void;
   onExportReceipt: () => void;
   onSelectStep: (step: StepNumber) => void;
+  hasDocument: boolean;
 }
 
 export const TelemetryInspector: React.FC<TelemetryInspectorProps> = ({
   activeStep,
   telemetry,
+  enterprisePolicy,
+  onOpenEnterpriseModal,
+  onProceedToNextStep,
   onDownloadPdf,
   onExportReceipt,
   onSelectStep,
+  hasDocument,
 }) => {
+  const [copiedHash, setCopiedHash] = useState(false);
+
   const tabs = [
     { num: 1 as StepNumber, label: '1. Ingest' },
     { num: 2 as StepNumber, label: '2. OCR' },
@@ -24,6 +34,15 @@ export const TelemetryInspector: React.FC<TelemetryInspectorProps> = ({
     { num: 4 as StepNumber, label: '4. Groth16' },
     { num: 5 as StepNumber, label: '5. Seal' },
   ];
+
+  const copyHash = (hash: string) => {
+    navigator.clipboard.writeText(hash);
+    setCopiedHash(true);
+    setTimeout(() => setCopiedHash(false), 2000);
+  };
+
+  const docHash = telemetry.ingest?.originalDocHash || 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+  const chunkedHash = telemetry.ingest?.chunkedHash || docHash.match(/.{1,8}/g)?.join(' ') || docHash;
 
   return (
     <div className="neu-card" style={{ width: '100%', padding: '20px 24px', gap: '14px' }}>
@@ -77,68 +96,138 @@ export const TelemetryInspector: React.FC<TelemetryInspectorProps> = ({
         className="neu-well-deep"
         style={{
           flex: '1 1 auto',
-          minHeight: '400px',
+          minHeight: '440px',
           display: 'flex',
           flexDirection: 'column',
           gap: '14px',
         }}
       >
-        {/* STAGE 1 TELEMETRY */}
+        {/* STAGE 1: INGEST & SHA-256 TELEMETRY */}
         {activeStep === 1 && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--accent)', fontWeight: 700, fontSize: '0.85rem' }}>
-              <Hash size={16} />
-              <span>STAGE 1: DOCUMENT INGESTION & ROOTHASH</span>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--accent)', fontWeight: 700, fontSize: '0.85rem' }}>
+                <Hash size={16} />
+                <span>STAGE 1: DOCUMENT INGESTION & SHA-256 PREIMAGE</span>
+              </div>
+              <span className="neu-hash-pill">PHASE 1 ACTIVE</span>
             </div>
 
+            {/* Document Metadata Card */}
             <div className="neu-well" style={{ padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
-                <span style={{ color: 'var(--fg-muted)' }}>Target File:</span>
+                <span style={{ color: 'var(--fg-muted)' }}>Document Name:</span>
                 <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600 }}>
-                  {telemetry.ingest?.fileName || 'Accredited_Investor_Verification_ApexLP.pdf'}
+                  {telemetry.ingest?.fileName || 'No document loaded yet'}
                 </span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
-                <span style={{ color: 'var(--fg-muted)' }}>Payload Size:</span>
+                <span style={{ color: 'var(--fg-muted)' }}>Byte Length:</span>
                 <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600 }}>
-                  {telemetry.ingest?.fileSizeBytes ? `${(telemetry.ingest.fileSizeBytes / 1024).toFixed(1)} KB (${telemetry.ingest.fileSizeBytes} bytes)` : '48.2 KB (48,290 bytes)'}
+                  {telemetry.ingest?.fileSizeBytes ? `${(telemetry.ingest.fileSizeBytes / 1024).toFixed(1)} KB (${telemetry.ingest.fileSizeBytes.toLocaleString()} bytes)` : '—'}
                 </span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
-                <span style={{ color: 'var(--fg-muted)' }}>MIME Type:</span>
+                <span style={{ color: 'var(--fg-muted)' }}>MIME Classification:</span>
                 <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600 }}>
-                  {telemetry.ingest?.mimeType || 'application/pdf'}
+                  {telemetry.ingest?.mimeType || '—'}
                 </span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
-                <span style={{ color: 'var(--fg-muted)' }}>Ingestion Time:</span>
+                <span style={{ color: 'var(--fg-muted)' }}>Browser Ingestion:</span>
                 <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600 }}>
-                  {telemetry.ingest?.ingestTimestamp || 'Ready for ingestion'}
+                  {telemetry.ingest?.ingestTimestamp ? new Date(telemetry.ingest.ingestTimestamp).toLocaleTimeString() : 'Awaiting drop/upload'}
                 </span>
               </div>
             </div>
 
-            <div>
-              <div style={{ fontSize: '0.75rem', fontFamily: 'var(--font-mono)', color: 'var(--fg-muted)', marginBottom: '4px' }}>
-                DOCUMENT PREIMAGE SHA-256 H(Doc):
+            {/* SHA-256 Digest Card */}
+            <div className="neu-well" style={{ padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--accent)' }}>
+                  IMMUTABLE SHA-256 PREIMAGE DIGEST H(Doc):
+                </span>
+                <button
+                  className="neu-pill-btn"
+                  style={{ fontSize: '0.7rem', padding: '3px 8px', display: 'flex', alignItems: 'center', gap: '4px' }}
+                  onClick={() => copyHash(docHash)}
+                  disabled={!hasDocument}
+                >
+                  {copiedHash ? <Check size={12} color="var(--accent-secondary)" /> : <Copy size={12} />}
+                  <span>{copiedHash ? 'Copied' : 'Copy'}</span>
+                </button>
               </div>
+
+              {/* Chunked Human-Readable Hex */}
               <div
-                className="neu-well"
                 style={{
-                  padding: '10px 14px',
                   fontFamily: 'var(--font-mono)',
-                  fontSize: '0.78rem',
-                  color: 'var(--accent)',
+                  fontSize: '0.8rem',
+                  lineHeight: '1.6',
+                  color: 'var(--fg-primary)',
+                  backgroundColor: 'var(--bg-surface)',
+                  boxShadow: 'var(--shadow-inset-sm)',
+                  padding: '10px 14px',
+                  borderRadius: '10px',
                   wordBreak: 'break-all',
                 }}
               >
-                {telemetry.ingest?.originalDocHash || 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'}
+                {chunkedHash}
+              </div>
+
+              <div style={{ fontSize: '0.72rem', color: 'var(--fg-muted)', display: 'flex', justifyContent: 'space-between' }}>
+                <span>Standard: FIPS 180-4 (256-bit)</span>
+                <span>Entropy: 100% Client-side RAM</span>
               </div>
             </div>
 
-            <div style={{ fontSize: '0.76rem', color: 'var(--fg-muted)', lineHeight: '1.5' }}>
-              ✦ Ingested into local memory isolate with zero network sockets. Preimage hash serves as the immutable root for subsequent load-bearing proof seals.
+            {/* Simulated Enterprise Verification Requirement Card */}
+            <div className="neu-well" style={{ padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontSize: '0.76rem', fontWeight: 800, color: 'var(--fg-primary)' }}>
+                  ENTERPRISE VERIFIER SPECIFICATION
+                </span>
+                <button
+                  className="neu-pill-btn"
+                  style={{ fontSize: '0.7rem', padding: '3px 10px', display: 'flex', alignItems: 'center', gap: '4px' }}
+                  onClick={onOpenEnterpriseModal}
+                >
+                  <Sliders size={12} />
+                  <span>Configure Spec</span>
+                </button>
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
+                <span style={{ color: 'var(--fg-muted)' }}>Requester:</span>
+                <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600 }}>
+                  {enterprisePolicy.requesterName}
+                </span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
+                <span style={{ color: 'var(--fg-muted)' }}>Predicate Claim:</span>
+                <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--accent)' }}>
+                  {enterprisePolicy.targetField} &gt;= ${enterprisePolicy.thresholdValue.toLocaleString()} {enterprisePolicy.currency}
+                </span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem' }}>
+                <span style={{ color: 'var(--fg-muted)' }}>Challenge Nonce:</span>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.74rem' }}>
+                  {enterprisePolicy.challengeNonce.substring(0, 16)}...
+                </span>
+              </div>
             </div>
+
+            {/* Proceed to Stage 2 CTA when document is loaded */}
+            {hasDocument && (
+              <button
+                className="neu-btn-primary"
+                onClick={onProceedToNextStep}
+                style={{ width: '100%', padding: '12px', fontSize: '0.86rem', marginTop: '4px', gap: '8px' }}
+              >
+                <span>Proceed to Stage 2: OCR Detection & Range Prove</span>
+                <ArrowRight size={16} />
+              </button>
+            )}
           </div>
         )}
 
@@ -160,9 +249,9 @@ export const TelemetryInspector: React.FC<TelemetryInspectorProps> = ({
                 <span className="neu-secret-badge">{telemetry.ocr?.actualValueStr || '$145,000'}</span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem' }}>
-                <span style={{ color: 'var(--fg-muted)' }}>Public Verifier Threshold:</span>
+                <span style={{ color: 'var(--fg-muted)' }}>Enterprise Threshold:</span>
                 <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--fg-primary)' }}>
-                  {telemetry.ocr?.thresholdStr || '>= $100,000'}
+                  {telemetry.ocr?.thresholdStr || `>= $${enterprisePolicy.thresholdValue.toLocaleString()} ${enterprisePolicy.currency}`}
                 </span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem' }}>
@@ -184,10 +273,6 @@ export const TelemetryInspector: React.FC<TelemetryInspectorProps> = ({
                 <span style={{ color: 'var(--fg-muted)' }}>OCR Coordinate BBox:</span>
                 <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600 }}>[x: 178, y: 138, w: 124, h: 22]</span>
               </div>
-            </div>
-
-            <div style={{ fontSize: '0.76rem', color: 'var(--fg-muted)', lineHeight: '1.5' }}>
-              ✦ Coordinates are extracted directly from the in-browser canvas renderer, preserving sub-pixel alignments for cryptographic seal binding.
             </div>
           </div>
         )}
@@ -244,10 +329,6 @@ export const TelemetryInspector: React.FC<TelemetryInspectorProps> = ({
                 {telemetry.raster?.redactedDocHash || 'a718b52f190e82c16198f7e2a90098df49281a9f0298ec29810f18837190ad52'}
               </div>
             </div>
-
-            <div style={{ fontSize: '0.76rem', color: 'var(--fg-muted)', lineHeight: '1.5' }}>
-              ✦ The document text streams have been permanently scrubbed. Unlike naive PDF black highlights, no selectable text or underlying vector shapes remain.
-            </div>
           </div>
         )}
 
@@ -272,7 +353,6 @@ export const TelemetryInspector: React.FC<TelemetryInspectorProps> = ({
               </div>
             </div>
 
-            {/* Blinding Salt & Commitment */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
               <div>
                 <div style={{ fontSize: '0.72rem', fontFamily: 'var(--font-mono)', color: 'var(--fg-muted)', marginBottom: '2px' }}>
@@ -293,7 +373,6 @@ export const TelemetryInspector: React.FC<TelemetryInspectorProps> = ({
               </div>
             </div>
 
-            {/* Curve Points pi_A, pi_B, pi_C */}
             <div>
               <div style={{ fontSize: '0.72rem', fontFamily: 'var(--font-mono)', color: 'var(--fg-muted)', marginBottom: '4px' }}>
                 GROTH16 CURVE POINTS (π_A ∈ G1, π_B ∈ G2, π_C ∈ G1):
@@ -332,7 +411,7 @@ export const TelemetryInspector: React.FC<TelemetryInspectorProps> = ({
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <span style={{ fontSize: '0.82rem', color: 'var(--fg-muted)' }}>Status:</span>
                 <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8rem', fontWeight: 700, color: 'var(--accent-secondary)' }}>
-                  VALID (Income &gt;= $100,000)
+                  {telemetry.seal?.verificationStatus || `VALID (Income >= $${enterprisePolicy.thresholdValue.toLocaleString()})`}
                 </span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -358,13 +437,6 @@ export const TelemetryInspector: React.FC<TelemetryInspectorProps> = ({
                 }}
               >
                 {telemetry.seal?.masterSeal?.sealHex || '0x4f8a9e210b37cd9a882f014e7a83d41092e0ab778f21908ca148'}
-              </div>
-            </div>
-
-            <div style={{ fontSize: '0.72rem', fontFamily: 'var(--font-mono)', color: 'var(--fg-muted)' }}>
-              PREIMAGE BINDING FORMULA:
-              <div className="neu-well" style={{ padding: '8px 10px', fontSize: '0.68rem', marginTop: '2px', color: 'var(--fg-primary)' }}>
-                {telemetry.seal?.masterSeal?.preimage.substring(0, 90) || 'zeroara:seal:v1:doc:...:bbox:...:commit:...:proof:...'}...
               </div>
             </div>
 
