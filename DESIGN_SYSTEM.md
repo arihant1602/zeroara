@@ -40,11 +40,11 @@ The entire palette is built around a single base cool grey. **All visual interes
 
 - **Muted**: `#6B7280` — Cool grey for secondary text with WCAG AA compliant contrast (4.6:1 ratio on the background).
 
-- **Accent**: `#6C63FF` — Soft violet for interactive highlights. Used sparingly for CTAs and focus states.
+- **Accent**: `#EA580C` — Vivid Zeroara Orange for interactive highlights and primary CTAs. Used with purpose.
 
-- **Accent Light**: `#8B84FF` — Lighter violet for gradients and hover states.
+- **Accent Light**: `#FB923C` — Lighter warm orange for gradients, subtle glows, and hover states.
 
-- **Accent Secondary**: `#38B2AC` — Teal for success states, checkmarks, and positive indicators.
+- **Accent Secondary**: `#0D9488` — Cryptographic teal for positive status indicators, verification badges, and success anchors.
 
 - **Border**: `transparent` — Neumorphism **never** uses borders; shadows define all edges.
 
@@ -152,9 +152,9 @@ box-shadow: inset 3px 3px 6px rgb(163,177,198,0.6), inset -3px -3px 6px rgba(255
 
 - **Active/Pressed State**: `translate-y-[0.5px]` (physical press) + `Inset Small` shadow (or standard inset depending on size).
 
-- **Primary**: Accent background `#6C63FF`. Active state uses specific rgba inset shadows to work on color.
+- **Primary**: Accent background `#EA580C` with dual orange-tinted extruded shadows. Active state uses specific rgba inset shadows to work on color.
 
-- **Secondary**: Background `#E0E5EC` (match page).
+- **Secondary**: Background `#E0E5EC` (matches page, extruded dual-shadow physics).
 
 ### Cards
 
@@ -224,7 +224,7 @@ box-shadow: inset 3px 3px 6px rgb(163,177,198,0.6), inset -3px -3px 6px rgba(255
 
 - Muted text `#6B7280` on `#E0E5EC`: 4.6:1 (WCAG AA)
 
-- **Focus States**: Visible 2px accent rings `ring-2 ring-[#6C63FF]`) with 2px offset on `#E0E5EC` background. Mandatory on all interactive elements.
+- **Focus States**: Visible 2px accent rings (`ring-2 ring-[#EA580C]`) with 2px offset on `#E0E5EC` background. Mandatory on all interactive elements.
 
 - **Touch Targets**: Minimum 44x44px for mobile (buttons use `h-12 w-12` = 48px minimum).
 
