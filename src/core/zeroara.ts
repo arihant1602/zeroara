@@ -3,7 +3,6 @@ import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
 import { buildPoseidon } from 'circomlibjs';
 // @ts-expect-error snarkjs lacks full ts declarations
 import * as snarkjs from 'snarkjs';
-// @ts-expect-error pdfjs-dist lack of explicit default export
 import * as pdfjs from 'pdfjs-dist';
 
 if (typeof window !== 'undefined' && (pdfjs as any)?.GlobalWorkerOptions) {
@@ -188,7 +187,7 @@ export async function verifyIncomeProof(
 // Seal = Hash(Doc_Redacted_Hash || BoundingBox || WitnessCommitment || Proof_pi)
 export async function computeMasterAuditSeal(
   docRedactedHash: string,
-  bboxes: BoundingBoxCoords[],
+  bboxes: Array<{ id: string; x: number; y: number; width: number; height: number; [key: string]: any }>,
   commitment: string,
   proof: Groth16ProofPoints
 ): Promise<MasterSealResult> {
@@ -206,6 +205,75 @@ export async function computeMasterAuditSeal(
     bboxSummary,
     commitment,
     proofDigest,
+  };
+}
+
+export interface ZeroaraAuditPackage {
+  protocol: 'Zeroara Provable Redaction Protocol';
+  version: '1.0.0';
+  generatedAt: string;
+  sourceDocument: {
+    fileName: string;
+    fileSizeBytes: number;
+    mimeType: string;
+    preimageSha256: string;
+  };
+  sanitizedDocument: {
+    fileSizeBytes: number;
+    preimageSha256: string;
+    burnedBoundingBoxes: Array<{ id: string; label: string; x: number; y: number; width: number; height: number; page: number }>;
+    textStreamsDetected: number;
+  };
+  enterpriseRequirement: {
+    requesterName: string;
+    purpose: string;
+    targetField: string;
+    predicate: string;
+    thresholdValue: number;
+    currency: string;
+    challengeNonce: string;
+  };
+  zeroKnowledgeProof: {
+    curve: string;
+    protocol: string;
+    publicSignals: string[];
+    proof: Groth16ProofPoints;
+    poseidonCommitment: string;
+    blindingSalt: string;
+    verified: boolean;
+    verificationLatencyMs: number;
+  };
+  masterAuditSeal: MasterSealResult;
+}
+
+export async function verifyAuditPackage(pkg: ZeroaraAuditPackage): Promise<{
+  sealValid: boolean;
+  proofValid: boolean;
+  computedSealHex: string;
+  expectedSealHex: string;
+}> {
+  // 1. Recompute Master Seal
+  const bboxes = pkg.sanitizedDocument.burnedBoundingBoxes;
+  const recomputed = await computeMasterAuditSeal(
+    pkg.sanitizedDocument.preimageSha256,
+    bboxes,
+    pkg.zeroKnowledgeProof.poseidonCommitment,
+    pkg.zeroKnowledgeProof.proof
+  );
+
+  const sealValid = recomputed.sealHex.toLowerCase() === pkg.masterAuditSeal.sealHex.toLowerCase();
+
+  // 2. Verify ZK Proof
+  const proofVerify = await verifyIncomeProof(
+    pkg.zeroKnowledgeProof.proof,
+    pkg.zeroKnowledgeProof.publicSignals
+  );
+
+  return {
+    sealValid,
+    proofValid: proofVerify.isValid,
+    computedSealHex: recomputed.sealHex,
+    expectedSealHex: pkg.masterAuditSeal.sealHex,
   };
 }
 
