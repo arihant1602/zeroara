@@ -1,50 +1,83 @@
-import { useState } from 'react';
 import './App.css';
-import { Navbar } from './components/Navbar';
-import { OverviewView } from './components/OverviewView';
-import { StudioView } from './components/StudioView';
-import { VerifierView } from './components/VerifierView';
-import { ArchitectureView } from './components/ArchitectureView';
-import { ProvableRedactionBundle } from './types';
+import { usePipeline } from './hooks/usePipeline';
+import { PipelineStepper } from './components/PipelineStepper';
+import { DocumentViewport } from './components/DocumentViewport';
+import { TelemetryInspector } from './components/TelemetryInspector';
+import { VerificationGate } from './components/VerificationGate';
 
 export function App() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'studio' | 'verifier' | 'spec'>('overview');
-  const [activeBundle, setActiveBundle] = useState<ProvableRedactionBundle | null>(null);
+  const {
+    pipelineState,
+    activeStep,
+    completedSteps,
+    telemetry,
+    networkActivity,
+    verificationModalOpen,
+    verificationResult,
+    isVerifying,
+    loadSampleDocument,
+    selectStep,
+    runEnterpriseVerification,
+    downloadRedactedPdf,
+    exportAuditReceipt,
+    resetPipeline,
+    setVerificationModalOpen,
+  } = usePipeline();
 
-  const handleBundleGenerated = (bundle: ProvableRedactionBundle) => {
-    setActiveBundle(bundle);
-  };
+  const isSealed = pipelineState === 'SEALED';
 
   return (
     <div className="app-shell">
-      <Navbar
-        activeTab={activeTab}
-        setActiveTab={setActiveTab}
-        hasBurnedBundle={!!activeBundle}
-      />
-
-      <main className="main-viewport">
-        {activeTab === 'overview' && (
-          <OverviewView
-            onBundleGenerated={handleBundleGenerated}
-            onNavigateToStudio={() => setActiveTab('studio')}
-            onNavigateToVerifier={() => setActiveTab('verifier')}
+      {/* Scrollable Viewport Container */}
+      <main className="main-viewport" style={{ padding: '20px 32px 40px 32px' }}>
+        <div className="view-container" style={{ maxWidth: '1360px', gap: '20px' }}>
+          {/* 1. Top Pipeline Stepper (Visual Map & State Machine Controller) */}
+          <PipelineStepper
+            pipelineState={pipelineState}
+            activeStep={activeStep}
+            completedSteps={completedSteps}
+            onSelectStep={selectStep}
+            networkActivity={networkActivity}
+            onLoadSample={loadSampleDocument}
+            onReset={resetPipeline}
           />
-        )}
 
-        {activeTab === 'studio' && (
-          <StudioView
-            activeBundle={activeBundle}
-            onBundleGenerated={handleBundleGenerated}
-            onNavigateToVerifier={() => setActiveTab('verifier')}
+          {/* 2. Split-Pane Workspace (Side-by-Side Left & Right Panels) */}
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'minmax(0, 1.15fr) minmax(0, 1fr)',
+              gap: '20px',
+              alignItems: 'stretch',
+            }}
+          >
+            {/* Left Panel: Document Viewport (PDF / Canvas) */}
+            <DocumentViewport
+              activeStep={activeStep}
+              pipelineState={pipelineState}
+              telemetry={telemetry}
+            />
+
+            {/* Right Panel: Cryptographic Telemetry Inspector */}
+            <TelemetryInspector
+              activeStep={activeStep}
+              telemetry={telemetry}
+              onDownloadPdf={downloadRedactedPdf}
+              onExportReceipt={exportAuditReceipt}
+              onSelectStep={selectStep}
+            />
+          </div>
+
+          {/* 3. One-Click Verification Gate (Bottom Action Strip & Modal) */}
+          <VerificationGate
+            isSealed={isSealed}
+            isVerifying={isVerifying}
+            onRunVerification={runEnterpriseVerification}
+            verificationResult={verificationResult}
+            isOpen={verificationModalOpen}
+            onClose={() => setVerificationModalOpen(false)}
           />
-        )}
-
-        {activeTab === 'verifier' && (
-          <VerifierView initialBundle={activeBundle} />
-        )}
-
-        {activeTab === 'spec' && <ArchitectureView />}
+        </div>
       </main>
     </div>
   );
