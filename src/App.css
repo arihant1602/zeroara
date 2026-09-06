@@ -521,3 +521,18 @@ pre {
 .spin {
   animation: spin 1s linear infinite;
 }
+
+.phase-active-border {
+  outline: 2px solid var(--accent);
+  box-shadow: var(--shadow-extruded-hover) !important;
+}
+
+.phase-active-border-rose {
+  outline: 2px solid var(--accent-rose);
+  box-shadow: var(--shadow-extruded-hover) !important;
+}
+
+.phase-active-border-teal {
+  outline: 2px solid var(--accent-secondary);
+  box-shadow: var(--shadow-extruded-hover) !important;
+}
