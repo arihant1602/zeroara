@@ -130,10 +130,30 @@ export const STAGE_CONFIG: Record<StageNumber, { title: string; subtitle: string
   },
 };
 
+const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
+  avif: 'image/avif',
+  bmp: 'image/bmp',
+  gif: 'image/gif',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  webp: 'image/webp',
+};
+
+function resolveUploadMimeType(file: File): string | null {
+  if (file.type === 'application/pdf' || file.type.startsWith('image/')) {
+    return file.type;
+  }
+
+  const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
+  return IMAGE_MIME_BY_EXTENSION[extension] ?? (extension === 'pdf' ? 'application/pdf' : null);
+}
+
 export function App() {
   const [stage, setStage] = useState<StageNumber>(1);
   const [doc, setDoc] = useState<IngestedDoc | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [copiedRedacted, setCopiedRedacted] = useState(false);
   const [copiedProof, setCopiedProof] = useState(false);
@@ -541,6 +561,13 @@ export function App() {
 
   // Ingest uploaded user document
   const handleFileUpload = async (file: File) => {
+    const mimeType = resolveUploadMimeType(file);
+    if (!mimeType) {
+      setUploadError('Choose a PDF or an image file (PNG, JPEG, WebP, GIF, BMP, or AVIF).');
+      return;
+    }
+
+    setUploadError(null);
     const arrayBuffer = await file.arrayBuffer();
     const rawBytes = new Uint8Array(arrayBuffer);
     const hashHex = await sha256Hex(rawBytes);
@@ -549,7 +576,7 @@ export function App() {
     const newDoc: IngestedDoc = {
       fileName: file.name,
       fileSizeBytes: file.size,
-      mimeType: file.type || 'application/octet-stream',
+      mimeType,
       hashHex,
       chunkedHash,
       timestamp: new Date().toLocaleTimeString(),
@@ -714,7 +741,7 @@ export function App() {
         type="file"
         ref={fileInputRef}
         onChange={(e) => e.target.files?.[0] && handleFileUpload(e.target.files[0])}
-        accept=".pdf,.png,.jpg,.jpeg"
+        accept="application/pdf,image/*,.pdf"
         style={{ display: 'none' }}
       />
 
@@ -939,8 +966,13 @@ export function App() {
                     Drop your document here, or click to browse
                   </h4>
                   <p style={{ fontSize: '0.84rem', color: 'var(--fg-muted)', marginTop: '6px', maxWidth: '380px' }}>
-                    Supports <strong>PDF, PNG, JPG, or TXT</strong>. Ingested directly into your browser's private memory isolate with <strong>0 network requests</strong>.
+                    Supports <strong>PDF and images</strong> — PNG, JPEG, WebP, GIF, BMP, and AVIF. Ingested directly into your browser's private memory isolate with <strong>0 network requests</strong>.
                   </p>
+                  {uploadError && (
+                    <p role="alert" style={{ fontSize: '0.78rem', color: '#B91C1C', marginTop: '8px', maxWidth: '420px' }}>
+                      {uploadError}
+                    </p>
+                  )}
                 </div>
                 <div style={{ display: 'flex', gap: '10px' }}>
                   <button
