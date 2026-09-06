@@ -608,12 +608,11 @@ export function classifyExtractedTargets(
   }
 
   // Pattern 2: Financial Witness Claim (Currency amounts with USD or $)
-  // Matches e.g. "USD 145,000", "$145,000", "145,000"
-  const incomeRegex = /(?:USD|\$)?\s*(\d{1,3}(?:,\d{3})+|\d{4,9})(?:\s*USD)?/i;
-  // Look for income tokens specifically
   const incomeToken = tokens.find(
     (t) =>
-      (t.text.includes('145,000') || (incomeRegex.test(t.text) && Number(t.text.replace(/[^0-9]/g, '')) >= 10000))
+      t.text.includes('145,000') ||
+      /(?:USD|\$)\s*\d{1,3}(?:,\d{3})+/i.test(t.text) ||
+      /\b\d{1,3}(?:,\d{3})+\s*(?:USD)?\b/i.test(t.text)
   );
 
   if (incomeToken) {
@@ -621,7 +620,7 @@ export function classifyExtractedTargets(
     const digits = Number(rawVal.replace(/[^0-9]/g, ''));
     targets.push({
       id: 'field_income',
-      label: '2-Year Trailing Income',
+      label: '2-Year Trailing Net Income',
       classification: 'Financial Witness Claim',
       extractedValue: rawVal,
       numericValue: digits,
