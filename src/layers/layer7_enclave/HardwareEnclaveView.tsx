@@ -1,65 +1,22 @@
 import React from 'react';
-import { Cpu, Lock, ArrowLeft } from 'lucide-react';
+import { Lock } from 'lucide-react';
 
 interface HardwareEnclaveViewProps {
   onBackToStudio?: () => void;
+  onNavigateToStage?: (stage: number) => void;
 }
 
-export const HardwareEnclaveView: React.FC<HardwareEnclaveViewProps> = ({ onBackToStudio }) => {
+export const HardwareEnclaveView: React.FC<HardwareEnclaveViewProps> = ({
+  onNavigateToStage,
+}) => {
   return (
-    <div className="view-container" style={{ maxWidth: '1200px', gap: '24px' }}>
-      {/* Header Card */}
-      <div className="neu-card" style={{ padding: '28px', borderRadius: '32px', gap: '16px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
-            <div
-              style={{
-                width: '44px',
-                height: '44px',
-                borderRadius: '50%',
-                backgroundColor: 'var(--bg-surface)',
-                boxShadow: 'var(--shadow-inset)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                color: 'var(--accent)',
-              }}
-            >
-              <Cpu size={24} />
-            </div>
-            <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                <h2 style={{ fontFamily: 'var(--font-display)', fontSize: '1.25rem', fontWeight: 800, color: 'var(--fg-primary)' }}>
-                  LAYER 7: HARDWARE ATTESTATION & OS ENCLAVE BINDING
-                </h2>
-                <span className="neu-badge">UNDER CONSTRUCTION · TARGET v0.3</span>
-              </div>
-              <p style={{ fontSize: '0.82rem', color: 'var(--fg-muted)', marginTop: '2px' }}>
-                Physical TPM 2.0 and Apple Secure Enclave hardware root key signing with volatile RAM locking (mlock).
-              </p>
-            </div>
-          </div>
-
-          {onBackToStudio && (
-            <button
-              type="button"
-              className="neu-btn-secondary"
-              style={{ fontSize: '0.82rem', padding: '8px 16px', gap: '6px' }}
-              onClick={onBackToStudio}
-            >
-              <ArrowLeft size={14} />
-              <span>Back to Studio</span>
-            </button>
-          )}
-        </div>
-      </div>
-
+    <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '20px' }}>
       {/* Blank Section Placeholder Card */}
-      <div className="neu-card" style={{ padding: '48px 32px', borderRadius: '32px', alignItems: 'center', textAlign: 'center', gap: '20px' }}>
+      <div className="neu-card" style={{ padding: '40px 32px', borderRadius: '28px', alignItems: 'center', textAlign: 'center', gap: '20px' }}>
         <div
           style={{
-            width: '80px',
-            height: '80px',
+            width: '72px',
+            height: '72px',
             borderRadius: '50%',
             backgroundColor: 'var(--bg-surface)',
             boxShadow: 'var(--shadow-extruded)',
@@ -117,6 +74,17 @@ export const HardwareEnclaveView: React.FC<HardwareEnclaveViewProps> = ({ onBack
         <div className="neu-code-block" style={{ maxWidth: '860px', width: '100%', textAlign: 'left' }}>
           <code>// src/layers/layer7_enclave/README.md & src-tauri/src/enclave.rs contain developer specifications.</code>
         </div>
+
+        {onNavigateToStage && (
+          <button
+            type="button"
+            className="neu-btn-primary"
+            style={{ padding: '12px 28px', fontSize: '0.86rem', gap: '8px', marginTop: '8px' }}
+            onClick={() => onNavigateToStage(8)}
+          >
+            <span>Proceed to Stage 8: Transport Protocol →</span>
+          </button>
+        )}
       </div>
     </div>
   );

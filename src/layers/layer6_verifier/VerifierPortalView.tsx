@@ -20,11 +20,13 @@ import { runEnterpriseAudit, createTamperedPackage } from './verifierEngine';
 interface VerifierPortalViewProps {
   initialPackage?: ZeroaraAuditPackage | null;
   onNavigateToStudio?: () => void;
+  onNavigateToStage?: (stage: number) => void;
 }
 
 export const VerifierPortalView: React.FC<VerifierPortalViewProps> = ({
   initialPackage,
-  onNavigateToStudio,
+  onNavigateToStudio: _onNavigateToStudio,
+  onNavigateToStage,
 }) => {
   const [activePkg, setActivePkg] = useState<ZeroaraAuditPackage | null>(initialPackage || null);
   const [report, setReport] = useState<VerifierAuditReport | null>(null);
@@ -111,7 +113,7 @@ export const VerifierPortalView: React.FC<VerifierPortalViewProps> = ({
   };
 
   return (
-    <div className="view-container" style={{ maxWidth: '1360px', gap: '24px' }}>
+    <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '20px' }}>
       {/* Hidden File Inputs */}
       <input
         type="file"
@@ -127,100 +129,6 @@ export const VerifierPortalView: React.FC<VerifierPortalViewProps> = ({
         accept=".pdf"
         style={{ display: 'none' }}
       />
-
-      {/* Layer 6 Header Card */}
-      <div className="neu-card" style={{ padding: '24px 28px', borderRadius: '28px', gap: '16px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
-            <div
-              style={{
-                width: '44px',
-                height: '44px',
-                borderRadius: '50%',
-                backgroundColor: 'var(--bg-surface)',
-                boxShadow: 'var(--shadow-inset)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                color: report?.overallValid ? 'var(--accent-secondary)' : 'var(--accent)',
-              }}
-            >
-              <ShieldCheck size={24} />
-            </div>
-            <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                <h2 style={{ fontFamily: 'var(--font-display)', fontSize: '1.25rem', fontWeight: 800, color: 'var(--fg-primary)', letterSpacing: '-0.02em' }}>
-                  STAGE 6: STANDALONE ENTERPRISE VERIFIER PORTAL
-                </h2>
-                <span className="neu-badge">LAYER 6 SUITE</span>
-              </div>
-              <p style={{ fontSize: '0.82rem', color: 'var(--fg-muted)', marginTop: '2px' }}>
-                Third-party mathematical verification of provable redaction packages without disclosing raw documents or private PII.
-              </p>
-            </div>
-          </div>
-
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            {activePkg && (
-              <button
-                type="button"
-                className="neu-btn-secondary"
-                style={{ fontSize: '0.82rem', padding: '8px 16px', gap: '6px' }}
-                onClick={() => {
-                  setActivePkg(null);
-                  setReport(null);
-                  setUploadedPdfName(null);
-                  setUploadedPdfBytes(undefined);
-                  setTamperMode('NONE');
-                }}
-              >
-                <RefreshCw size={13} />
-                <span>Reset Audit Session</span>
-              </button>
-            )}
-            {onNavigateToStudio && (
-              <button
-                type="button"
-                className="neu-btn-primary"
-                style={{ fontSize: '0.82rem', padding: '8px 16px', gap: '6px' }}
-                onClick={onNavigateToStudio}
-              >
-                <span>Go to Redaction Studio</span>
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* 3-Column Architecture Card */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '16px' }}>
-          <div className="neu-well" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase' }}>
-              01. 5-Gate Mathematical Audit
-            </div>
-            <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
-              Evaluates Document Preimage, Spatial Geometry, Poseidon Commitment, Groth16 zk-SNARK, and Quad-Factor Master Seal.
-            </p>
-          </div>
-
-          <div className="neu-well" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase' }}>
-              02. Zero Private Data Leakage
-            </div>
-            <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
-              The auditor verifies that the applicant meets the criteria with <strong>0 confidential bytes disclosed</strong>.
-            </p>
-          </div>
-
-          <div className="neu-well" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase' }}>
-              03. 1-Pixel Tamper Sensitivity
-            </div>
-            <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
-              Any alteration of the bounding box coordinates, proof scalars, or document pixels triggers an immediate seal failure.
-            </p>
-          </div>
-        </div>
-      </div>
 
       {/* Main Split-Pane */}
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.15fr) minmax(0, 1fr)', gap: '20px', alignItems: 'stretch' }}>
@@ -570,6 +478,17 @@ export const VerifierPortalView: React.FC<VerifierPortalViewProps> = ({
                   <Download size={16} />
                   <span>Export Cryptographic Compliance Certificate (.json)</span>
                 </button>
+
+                {onNavigateToStage && (
+                  <button
+                    type="button"
+                    className="neu-btn-secondary"
+                    style={{ width: '100%', padding: '11px', fontSize: '0.84rem', gap: '8px', color: 'var(--accent)' }}
+                    onClick={() => onNavigateToStage(7)}
+                  >
+                    <span>Proceed to Stage 7: Hardware Enclave & TPM 2.0 →</span>
+                  </button>
+                )}
               </div>
             </div>
           )}
