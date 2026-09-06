@@ -1,5 +1,5 @@
 import React from 'react';
-import { Lock } from 'lucide-react';
+import { Lock, ArrowRight } from 'lucide-react';
 
 interface HardwareEnclaveViewProps {
   onBackToStudio?: () => void;
@@ -82,7 +82,8 @@ export const HardwareEnclaveView: React.FC<HardwareEnclaveViewProps> = ({
             style={{ padding: '12px 28px', fontSize: '0.86rem', gap: '8px', marginTop: '8px' }}
             onClick={() => onNavigateToStage(8)}
           >
-            <span>Proceed to Stage 8: Transport Protocol →</span>
+            <span>Next</span>
+            <ArrowRight size={14} />
           </button>
         )}
       </div>

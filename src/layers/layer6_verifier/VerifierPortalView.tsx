@@ -12,6 +12,7 @@ import {
   Layers,
   Fingerprint,
   RefreshCw,
+  ArrowRight,
 } from 'lucide-react';
 import { ZeroaraAuditPackage } from '../layer5_seal/types';
 import { VerifierAuditReport, TamperMode } from './types';
@@ -486,7 +487,8 @@ export const VerifierPortalView: React.FC<VerifierPortalViewProps> = ({
                     style={{ width: '100%', padding: '11px', fontSize: '0.84rem', gap: '8px', color: 'var(--accent)' }}
                     onClick={() => onNavigateToStage(7)}
                   >
-                    <span>Proceed to Stage 7: Hardware Enclave & TPM 2.0 →</span>
+                    <span>Next</span>
+                    <ArrowRight size={14} />
                   </button>
                 )}
               </div>
