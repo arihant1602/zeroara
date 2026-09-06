@@ -45,6 +45,7 @@ export interface DocumentExtractionResult {
   height: number;
   numPages: number;
   usedOcrFallback: boolean;
+  pageRasters: Map<number, ImageData>;
 }
 
-export type OcrProgressFn = (percent: number, status: string) => void;
+export type OcrProgressFn = (percent: number, status: string, pageLabel?: string) => void;

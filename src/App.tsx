@@ -195,6 +195,11 @@ export function App() {
   const [extractedTokens, setExtractedTokens] = useState<ExtractedSpatialToken[]>([]);
   const [ocrTelemetry, setOcrTelemetry] = useState<OcrTelemetrySummary | null>(null);
 
+  // Pagination State
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const [totalPages, setTotalPages] = useState<number>(1);
+  const pageRastersRef = useRef<Map<number, ImageData>>(new Map());
+
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const cleanCanvasDataRef = useRef<ImageData | null>(null);
@@ -253,9 +258,6 @@ export function App() {
       setOcrRunning(true);
 
       try {
-        // Unified Stage 2 engine: pdf.js text layer, with Tesseract LSTM
-        // fallback for scanned PDFs and images (2.0x supersampled), plus
-        // line reconstruction + multi-token field classification.
         const result = await extractDocumentSpatial(
           doc,
           canvas,
@@ -266,10 +268,20 @@ export function App() {
 
         if (isCancelled) return;
 
-        // Cache the pristine rendered document raster for instant non-destructive HUD overlays
-        const ctx = canvas.getContext('2d');
-        if (ctx && canvas.width > 0 && canvas.height > 0) {
-          cleanCanvasDataRef.current = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        pageRastersRef.current = result.pageRasters;
+        setTotalPages(result.numPages);
+        setCurrentPage(1);
+
+        // Cache the pristine rendered document raster for the first page
+        const firstPageRaster = result.pageRasters.get(1);
+        if (firstPageRaster) {
+          cleanCanvasDataRef.current = firstPageRaster;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            canvas.width = firstPageRaster.width;
+            canvas.height = firstPageRaster.height;
+            ctx.putImageData(firstPageRaster, 0, 0);
+          }
         }
 
         setExtractedTokens(result.tokens);
@@ -285,9 +297,10 @@ export function App() {
           targetsFound: result.targets.length,
         });
 
-        // Overlay bounding boxes if in Phase 2
+        // Overlay bounding boxes for page 1 if in Phase 2
         if (stage === 2 && showHudOverlays) {
-          drawBoundingBoxOverlays(canvas, result.targets, result.targets[0]?.id || null);
+          const pageFields = result.targets.filter(f => f.page === 1);
+          drawBoundingBoxOverlays(canvas, pageFields, result.targets[0]?.id || null);
         }
       } catch (err) {
         console.error('Document spatial processing error:', err);
@@ -305,7 +318,7 @@ export function App() {
     };
   }, [doc]);
 
-  // Synchronous blit & redraw overlays whenever Stage, HUD toggle, or target selection changes
+  // Synchronous blit & redraw overlays whenever Stage, HUD toggle, target selection, or page changes
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !cleanCanvasDataRef.current) return;
@@ -313,14 +326,50 @@ export function App() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Restore pristine document raster
+    // Restore pristine document raster for current page
     ctx.putImageData(cleanCanvasDataRef.current, 0, 0);
 
     // Draw active bounding box overlays if in Stage 2
     if (stage === 2 && showHudOverlays && detectedFields.length > 0) {
-      drawBoundingBoxOverlays(canvas, detectedFields, selectedFieldId);
+      const pageFields = detectedFields.filter(f => f.page === currentPage);
+      drawBoundingBoxOverlays(canvas, pageFields, selectedFieldId);
     }
-  }, [stage, showHudOverlays, selectedFieldId, detectedFields]);
+  }, [stage, showHudOverlays, selectedFieldId, detectedFields, currentPage]);
+
+  const renderCurrentPage = (pageNum: number) => {
+    const canvas = canvasRef.current;
+    const raster = pageRastersRef.current.get(pageNum);
+    if (!canvas || !raster) return;
+
+    cleanCanvasDataRef.current = raster;
+    canvas.width = raster.width;
+    canvas.height = raster.height;
+    
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.putImageData(raster, 0, 0);
+      if (stage === 2 && showHudOverlays) {
+        const pageFields = detectedFields.filter(f => f.page === pageNum);
+        drawBoundingBoxOverlays(canvas, pageFields, selectedFieldId);
+      }
+    }
+  };
+
+  const handlePrevPage = () => {
+    if (currentPage > 1) {
+      const next = currentPage - 1;
+      setCurrentPage(next);
+      renderCurrentPage(next);
+    }
+  };
+
+  const handleNextPage = () => {
+    if (currentPage < totalPages) {
+      const next = currentPage + 1;
+      setCurrentPage(next);
+      renderCurrentPage(next);
+    }
+  };
 
   // Execute Stage 3: Physical Pixel Burning & Text Stream Stripping
   const executePixelBurn = async () => {
@@ -329,15 +378,17 @@ export function App() {
 
     setIsBurning(true);
     try {
-      // Restore clean raster before burning to avoid baking HUD badges into the output
-      const ctx = canvas.getContext('2d');
-      if (ctx && cleanCanvasDataRef.current) {
-        ctx.putImageData(cleanCanvasDataRef.current, 0, 0);
-      }
-
-      const result = await createFlattenedRedactedPdf(canvas, detectedFields);
+      // Burn uses all page rasters from state instead of just the single canvas
+      const result = await createFlattenedRedactedPdf(
+        pageRastersRef.current,
+        totalPages,
+        detectedFields
+      );
       setRedactionResult(result);
       setViewMode('BURNED');
+      // Set to page 1 to show the first burned page in UI properly
+      setCurrentPage(1);
+      renderCurrentPage(1);
       setStage(3);
     } catch (err) {
       console.error('Redaction flattening error:', err);
@@ -1030,13 +1081,44 @@ export function App() {
                     }}
                   />
                   {stage >= 3 && viewMode === 'BURNED' && redactionResult && (
-                    <img
-                      src={redactionResult.flattenedPngDataUrl}
-                      alt="Physically Burned and Flattened Document Raster"
-                      style={{ maxWidth: '100%', height: 'auto', borderRadius: '12px', boxShadow: '0 8px 24px rgba(0,0,0,0.12)', display: 'block' }}
-                    />
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px' }}>
+                      <img
+                        src={redactionResult.flattenedPngDataUrl}
+                        alt="Physically Burned and Flattened Document Raster"
+                        style={{ maxWidth: '100%', height: 'auto', borderRadius: '12px', boxShadow: '0 8px 24px rgba(0,0,0,0.12)', display: 'block' }}
+                      />
+                      {totalPages > 1 && (
+                        <span style={{ fontSize: '0.74rem', color: 'var(--fg-muted)', fontWeight: 600 }}>
+                          Showing Page 1 of {totalPages} (All {totalPages} pages are contained in the downloadable PDF).
+                        </span>
+                      )}
+                    </div>
                   )}
                 </div>
+
+                {totalPages > 1 && stage < 3 && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginTop: '8px' }}>
+                    <button
+                      className="neu-pill-btn"
+                      onClick={() => handlePrevPage()}
+                      disabled={currentPage === 1}
+                      style={{ padding: '6px 12px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '4px' }}
+                    >
+                      <ArrowLeft size={14} /> Prev
+                    </button>
+                    <span style={{ fontSize: '0.84rem', fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--fg-primary)' }}>
+                      Page {currentPage} of {totalPages}
+                    </span>
+                    <button
+                      className="neu-pill-btn"
+                      onClick={() => handleNextPage()}
+                      disabled={currentPage === totalPages}
+                      style={{ padding: '6px 12px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '4px' }}
+                    >
+                      Next <ArrowRight size={14} />
+                    </button>
+                  </div>
+                )}
               </div>
 
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.74rem', fontFamily: 'var(--font-mono)', color: 'var(--fg-muted)' }}>
