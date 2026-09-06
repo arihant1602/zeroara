@@ -3,8 +3,13 @@ import './App.css';
 import {
   sha256Hex,
   formatChunkedHash,
-  renderPdfBytesToCanvas,
+  generateSamplePdfBytes,
+  extractPdfSpatialItems,
+  extractImageOcrSpatial,
+  classifyExtractedTargets,
   renderImageFileToCanvas,
+  type ExtractedSpatialToken,
+  type ClassifiedTarget,
 } from './core/zeroara';
 import {
   UploadCloud,
@@ -20,6 +25,10 @@ import {
   Scan,
   Crosshair,
   ArrowRight,
+  Plus,
+  Trash2,
+  SlidersHorizontal,
+  ChevronDown,
 } from 'lucide-react';
 
 export interface IngestedDoc {
@@ -44,38 +53,12 @@ export interface EnterpriseSpec {
   challengeNonce: string;
 }
 
-export interface DetectedOcrField {
-  id: string;
-  label: string;
-  classification: string;
-  extractedValue: string;
-  numericValue?: number;
-  satisfiesThreshold?: boolean;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  page: number;
-  action: 'PROVE_AND_BURN' | 'DIRECT_BURN';
+export interface OcrTelemetrySummary {
+  latencyMs: number;
+  tokenCount: number;
+  engineName: string;
+  targetsFound: number;
 }
-
-const SAMPLE_CERT_TEXT = `CONFIDENTIAL ACCREDITED INVESTOR VERIFICATION
-Issuer: Apex Distributed Ventures LP
-Target: Zeroara Protocol Round A
-Date of Examination: 2026-08-14
-
-Investor Legal Name: Alexandra Vance
-Social Security Number: 459-00-8812
-Tax Residency: United States of America
-Primary Asset Custody: Goldman Sachs Wealth Management
-
-FINANCIAL ASSESSMENT & EARNINGS CONFIRMATION:
-1. 2-Year Trailing Net Income: $145,000 USD
-2. Verified Individual Net Worth: $2,850,000 USD (Excl. primary residence)
-3. Liquidity Ratio: 4.2x regulatory baseline
-
-I hereby certify under penalty of perjury that the undersigned satisfies the definitions
-of an Accredited Investor as set forth in Rule 501 of Regulation D.`;
 
 export function App() {
   const [activePhase, setActivePhase] = useState<1 | 2>(1);
@@ -83,8 +66,14 @@ export function App() {
   const [isDragging, setIsDragging] = useState(false);
   const [copied, setCopied] = useState(false);
   const [ocrRunning, setOcrRunning] = useState(false);
-  const [selectedFieldId, setSelectedFieldId] = useState<string | null>('field_income');
+  const [selectedFieldId, setSelectedFieldId] = useState<string | null>(null);
   const [showHudOverlays, setShowHudOverlays] = useState(true);
+  const [showAllTokens, setShowAllTokens] = useState(false);
+
+  // Real OCR & Extraction Pipeline State
+  const [detectedFields, setDetectedFields] = useState<ClassifiedTarget[]>([]);
+  const [extractedTokens, setExtractedTokens] = useState<ExtractedSpatialToken[]>([]);
+  const [ocrTelemetry, setOcrTelemetry] = useState<OcrTelemetrySummary | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -106,35 +95,88 @@ export function App() {
     { label: 'Mortgage Solvency ($80k)', req: 'First Horizon Underwriting', field: 'Qualifying Annual Income', amount: 80000 },
   ];
 
-  // OCR Detected Fields definition
-  const detectedFields: DetectedOcrField[] = [
-    {
-      id: 'field_ssn',
-      label: 'Social Security Number',
-      classification: 'Government Identifier (Sensitive PII)',
-      extractedValue: '459-00-8812',
-      x: 182,
-      y: 138,
-      width: 124,
-      height: 22,
-      page: 1,
-      action: 'DIRECT_BURN',
-    },
-    {
-      id: 'field_income',
-      label: '2-Year Trailing Income',
-      classification: 'Financial Witness Claim',
-      extractedValue: '$145,000 USD',
-      numericValue: 145000,
-      satisfiesThreshold: 145000 >= enterpriseSpec.thresholdValue,
-      x: 222,
-      y: 244,
-      width: 110,
-      height: 22,
-      page: 1,
-      action: 'PROVE_AND_BURN',
-    },
-  ];
+  // Core Document Extraction Pipeline running on mounted canvas
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !doc || !doc.rawBytes) return;
+
+    let isCancelled = false;
+
+    const runExtraction = async () => {
+      setOcrRunning(true);
+      const start = performance.now();
+
+      try {
+        let tokens: ExtractedSpatialToken[] = [];
+        let engine = 'PDF Native Spatial Text Matrix';
+
+        if (doc.mimeType === 'application/pdf') {
+          const res = await extractPdfSpatialItems(doc.rawBytes!, canvas);
+          tokens = res.tokens;
+        } else if (doc.fileObj && doc.mimeType.startsWith('image/')) {
+          engine = 'In-Browser Neural OCR (Tesseract Wasm)';
+          await renderImageFileToCanvas(doc.fileObj, canvas);
+          const res = await extractImageOcrSpatial(canvas);
+          tokens = res.tokens;
+        }
+
+        if (isCancelled) return;
+
+        const classified = classifyExtractedTargets(tokens, enterpriseSpec.thresholdValue);
+        const elapsed = Math.max(1, Math.round(performance.now() - start));
+
+        setExtractedTokens(tokens);
+        setDetectedFields(classified);
+        if (classified.length > 0) {
+          setSelectedFieldId(classified[0].id);
+        }
+
+        setOcrTelemetry({
+          latencyMs: elapsed,
+          tokenCount: tokens.length,
+          engineName: engine,
+          targetsFound: classified.length,
+        });
+
+        // Overlay bounding boxes if in Phase 2
+        if (activePhase === 2 && showHudOverlays) {
+          drawBoundingBoxOverlays(canvas, classified, classified[0]?.id || null);
+        }
+      } catch (err) {
+        console.error('Document spatial processing error:', err);
+      } finally {
+        if (!isCancelled) {
+          setOcrRunning(false);
+        }
+      }
+    };
+
+    runExtraction();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [doc, enterpriseSpec.thresholdValue]);
+
+  // Redraw overlays on phase or selection changes
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !doc || !doc.rawBytes || detectedFields.length === 0) return;
+
+    const redraw = async () => {
+      if (doc.mimeType === 'application/pdf') {
+        await extractPdfSpatialItems(doc.rawBytes!, canvas);
+      } else if (doc.fileObj && doc.mimeType.startsWith('image/')) {
+        await renderImageFileToCanvas(doc.fileObj, canvas);
+      }
+
+      if (activePhase === 2 && showHudOverlays) {
+        drawBoundingBoxOverlays(canvas, detectedFields, selectedFieldId);
+      }
+    };
+
+    redraw();
+  }, [activePhase, showHudOverlays, selectedFieldId]);
 
   // Ingest uploaded user document
   const handleFileUpload = async (file: File) => {
@@ -143,7 +185,7 @@ export function App() {
     const hashHex = await sha256Hex(rawBytes);
     const chunkedHash = formatChunkedHash(hashHex);
 
-    setDoc({
+    const newDoc: IngestedDoc = {
       fileName: file.name,
       fileSizeBytes: file.size,
       mimeType: file.type || 'application/octet-stream',
@@ -153,164 +195,110 @@ export function App() {
       isSample: false,
       rawBytes,
       fileObj: file,
-    });
+    };
+
+    setDoc(newDoc);
     setActivePhase(1);
   };
 
-  // Ingest sample preset document
+  // Ingest synthesized authentic sample PDF document
   const handleLoadSample = async () => {
-    const rawBytes = new TextEncoder().encode(SAMPLE_CERT_TEXT);
-    const hashHex = await sha256Hex(rawBytes);
+    const samplePdfBytes = await generateSamplePdfBytes();
+    const hashHex = await sha256Hex(samplePdfBytes);
     const chunkedHash = formatChunkedHash(hashHex);
 
-    setDoc({
+    const newDoc: IngestedDoc = {
       fileName: 'Accredited_Investor_Verification_ApexLP.pdf',
-      fileSizeBytes: 48290,
+      fileSizeBytes: samplePdfBytes.length,
       mimeType: 'application/pdf',
       hashHex,
       chunkedHash,
       timestamp: new Date().toLocaleTimeString(),
       isSample: true,
-      rawBytes,
-    });
+      rawBytes: samplePdfBytes,
+    };
+
+    setDoc(newDoc);
     setActivePhase(1);
   };
 
-  // Run Phase 2 OCR simulation
-  const runOcrScan = async () => {
-    setOcrRunning(true);
-    await new Promise((r) => setTimeout(r, 600));
-    setOcrRunning(false);
-    setActivePhase(2);
-  };
-
-  // Canvas renderer
+  // Support URL parameters for automated verification & presets
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || !doc) return;
-
-    if (!doc.isSample && doc.rawBytes && doc.mimeType === 'application/pdf') {
-      renderPdfBytesToCanvas(doc.rawBytes, canvas).then(() => {
-        if (activePhase === 2 && showHudOverlays) {
-          drawOcrOverlays(canvas);
-        }
-      }).catch(() => {
-        renderSampleCanvas(canvas);
-        if (activePhase === 2 && showHudOverlays) {
-          drawOcrOverlays(canvas);
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('sample') === 'true' || params.get('phase') === '2') {
+      handleLoadSample().then(() => {
+        if (params.get('phase') === '2') {
+          setActivePhase(2);
         }
       });
-      return;
     }
+  }, []);
 
-    if (!doc.isSample && doc.fileObj && doc.mimeType.startsWith('image/')) {
-      renderImageFileToCanvas(doc.fileObj, canvas).then(() => {
-        if (activePhase === 2 && showHudOverlays) {
-          drawOcrOverlays(canvas);
-        }
-      }).catch(() => {
-        renderSampleCanvas(canvas);
-        if (activePhase === 2 && showHudOverlays) {
-          drawOcrOverlays(canvas);
-        }
-      });
-      return;
-    }
-
-    renderSampleCanvas(canvas);
-    if (activePhase === 2 && showHudOverlays) {
-      drawOcrOverlays(canvas);
-    }
-  }, [doc, activePhase, showHudOverlays, selectedFieldId, enterpriseSpec]);
-
-  const renderSampleCanvas = (canvas: HTMLCanvasElement) => {
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    const width = 640;
-    const height = 500;
-    canvas.width = width;
-    canvas.height = height;
-
-    ctx.fillStyle = '#FAFBFC';
-    ctx.fillRect(0, 0, width, height);
-    ctx.strokeStyle = '#D1D5DB';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(1, 1, width - 2, height - 2);
-
-    ctx.fillStyle = '#F1F5F9';
-    ctx.fillRect(24, 20, width - 48, 54);
-    ctx.strokeStyle = '#E2E8F0';
-    ctx.strokeRect(24, 20, width - 48, 54);
-
-    ctx.fillStyle = '#0F172A';
-    ctx.font = 'bold 15px "Plus Jakarta Sans", sans-serif';
-    ctx.fillText('CONFIDENTIAL ACCREDITED INVESTOR VERIFICATION', 40, 44);
-
-    ctx.fillStyle = '#64748B';
-    ctx.font = '10px "DM Sans", sans-serif';
-    ctx.fillText('SEC Rule 506(c) Regulatory Filing  •  Apex Distributed Ventures LP  •  Aug 14, 2026', 40, 62);
-
-    ctx.font = '12px "DM Sans", sans-serif';
-    ctx.fillStyle = '#334155';
-    let y = 105;
-    ctx.fillText('Investor Legal Identity: Alexandra Vance', 40, y);
-    y += 26;
-    ctx.fillText('Social Security Number: 459-00-8812', 40, y);
-    y += 26;
-    ctx.fillText('Tax Residency: United States of America', 40, y);
-    y += 26;
-    ctx.fillText('Custody Institution: Goldman Sachs Wealth Management (Ref: #APX-9921)', 40, y);
-    y += 34;
-
-    ctx.fillStyle = '#0F172A';
-    ctx.font = 'bold 12px "Plus Jakarta Sans", sans-serif';
-    ctx.fillText('FINANCIAL ASSESSMENT & EARNINGS CONFIRMATION:', 40, y);
-    y += 26;
-    ctx.font = '12px "DM Sans", sans-serif';
-    ctx.fillStyle = '#334155';
-    ctx.fillText('1. 2-Year Trailing Net Income: $145,000 USD', 40, y);
-    y += 26;
-    ctx.fillText('2. Verified Individual Net Worth: $2,850,000 USD (Excl. primary residence)', 40, y);
-    y += 26;
-    ctx.fillText('3. Liquidity Ratio: 4.2x baseline statutory coverage', 40, y);
-    y += 36;
-
-    ctx.fillStyle = '#64748B';
-    ctx.font = 'italic 10px "DM Sans", sans-serif';
-    ctx.fillText('I hereby attest under penalty of perjury that the verified credentials meet regulatory standards.', 40, y);
-  };
-
-  const drawOcrOverlays = (canvas: HTMLCanvasElement) => {
+  // Draw real spatial bounding boxes over canvas
+  const drawBoundingBoxOverlays = (
+    canvas: HTMLCanvasElement,
+    fields: ClassifiedTarget[] = detectedFields,
+    selectedId: string | null = selectedFieldId
+  ) => {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    detectedFields.forEach((field) => {
-      const isSelected = selectedFieldId === field.id;
+    fields.forEach((field) => {
+      const isSelected = selectedId === field.id;
       const isWitness = field.action === 'PROVE_AND_BURN';
       const mainColor = isWitness ? '#EA580C' : '#0D9488';
 
       ctx.save();
       // Bounding box fill
-      ctx.fillStyle = isWitness ? 'rgba(234, 88, 12, 0.12)' : 'rgba(13, 148, 136, 0.12)';
-      ctx.fillRect(field.x - 4, field.y - 15, field.width, field.height);
+      ctx.fillStyle = isWitness ? 'rgba(234, 88, 12, 0.14)' : 'rgba(13, 148, 136, 0.14)';
+      ctx.fillRect(field.x, field.y, field.width, field.height);
 
       // Bounding box stroke
       ctx.strokeStyle = mainColor;
       ctx.lineWidth = isSelected ? 2.5 : 1.5;
-      ctx.setLineDash([4, 3]);
-      ctx.strokeRect(field.x - 4, field.y - 15, field.width, field.height);
+      ctx.setLineDash(isSelected ? [] : [4, 3]);
+      ctx.strokeRect(field.x, field.y, field.width, field.height);
 
-      // Coordinate HUD badge
+      // Spatial HUD Tag Badge
       ctx.setLineDash([]);
       ctx.fillStyle = mainColor;
       ctx.font = 'bold 8.5px "JetBrains Mono", monospace';
-      const badgeText = isWitness
-        ? `WITNESS [x:${field.x}, y:${field.y}, w:${field.width}, h:${field.height}]`
-        : `PII: SSN [x:${field.x}, y:${field.y}, w:${field.width}, h:${field.height}]`;
-      ctx.fillText(badgeText, field.x - 4, field.y - 18);
+      const tagPrefix = isWitness ? 'WITNESS CLAIM' : 'PII IDENTIFIER';
+      const badgeText = `${tagPrefix} [x:${field.x}, y:${field.y}, w:${field.width}, h:${field.height}]`;
+      
+      const badgeY = field.y > 14 ? field.y - 4 : field.y + field.height + 10;
+      ctx.fillText(badgeText, field.x, badgeY);
 
       ctx.restore();
     });
+  };
+
+  // Add a specific token as a redaction target
+  const handleAddTokenAsTarget = (token: ExtractedSpatialToken) => {
+    const newTarget: ClassifiedTarget = {
+      id: `manual_${Date.now()}`,
+      label: `Redaction Zone: "${token.text.slice(0, 16)}"`,
+      classification: 'Manual Redaction Zone',
+      extractedValue: token.text,
+      x: Math.max(0, token.x - 3),
+      y: Math.max(0, token.y - 2),
+      width: token.width + 6,
+      height: token.height + 4,
+      page: token.page,
+      action: 'DIRECT_BURN',
+      source: 'MANUAL_USER',
+    };
+
+    setDetectedFields((prev) => [...prev, newTarget]);
+    setSelectedFieldId(newTarget.id);
+  };
+
+  // Remove a target
+  const handleRemoveTarget = (id: string) => {
+    setDetectedFields((prev) => prev.filter((f) => f.id !== id));
+    if (selectedFieldId === id) {
+      setSelectedFieldId(null);
+    }
   };
 
   const copyHash = () => {
@@ -328,6 +316,8 @@ export function App() {
     setEnterpriseSpec((prev) => ({ ...prev, challengeNonce: hex }));
   };
 
+  const witnessTarget = detectedFields.find((f) => f.action === 'PROVE_AND_BURN');
+
   return (
     <div className="app-shell">
       {/* Hidden File Input */}
@@ -335,7 +325,7 @@ export function App() {
         type="file"
         ref={fileInputRef}
         onChange={(e) => e.target.files?.[0] && handleFileUpload(e.target.files[0])}
-        accept=".pdf,.png,.jpg,.jpeg,.txt"
+        accept=".pdf,.png,.jpg,.jpeg"
         style={{ display: 'none' }}
       />
 
@@ -349,123 +339,133 @@ export function App() {
                 alt="Zeroara Logo"
                 style={{ width: '34px', height: '34px', objectFit: 'contain', display: 'block', filter: 'drop-shadow(0 2px 4px rgba(234, 88, 12, 0.3))' }}
               />
-              <div className="brand-title" style={{ fontSize: '1.25rem', letterSpacing: '-0.02em' }}>
+              <span style={{ fontFamily: 'var(--font-display)', fontWeight: 800, fontSize: '1.25rem', letterSpacing: '-0.02em', color: 'var(--fg-primary)' }}>
                 ZEROARA
-              </div>
-              <span className="brand-tag">PROVABLE REDACTION PROTOCOL</span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: 'var(--bg-surface)', boxShadow: 'var(--shadow-inset-sm)', padding: '4px 12px', borderRadius: 'var(--radius-pill)', fontFamily: 'var(--font-mono)', fontSize: '0.74rem', color: 'var(--accent-secondary)', fontWeight: 600 }}>
-                <WifiOff size={13} />
-                <span>EGRESS: 0 KB / 0 REQUESTS [SEVERED]</span>
-              </div>
+              </span>
+              <span className="neu-badge">
+                PROVABLE REDACTION PROTOCOL
+              </span>
+              <span className="neu-severed-pill">
+                <WifiOff size={13} style={{ display: 'inline', marginRight: '4px', verticalAlign: '-1px' }} />
+                EGRESS: 0 KB / 0 REQUESTS [SEVERED]
+              </span>
             </div>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              {!doc ? (
+              {doc ? (
                 <button
-                  className="neu-btn-primary"
-                  onClick={handleLoadSample}
-                  style={{ padding: '10px 20px', fontSize: '0.84rem' }}
-                >
-                  Load Sample Document
-                </button>
-              ) : (
-                <button
+                  type="button"
                   className="neu-btn-secondary"
-                  onClick={() => { setDoc(null); setActivePhase(1); }}
-                  style={{ padding: '8px 16px', fontSize: '0.82rem', gap: '6px' }}
+                  style={{ fontSize: '0.82rem', padding: '8px 16px', gap: '6px' }}
+                  onClick={() => {
+                    setDoc(null);
+                    setDetectedFields([]);
+                    setExtractedTokens([]);
+                    setOcrTelemetry(null);
+                    setActivePhase(1);
+                  }}
                 >
                   <RefreshCw size={13} />
                   <span>Clear & Upload Another</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="neu-btn-primary"
+                  style={{ fontSize: '0.84rem', padding: '9px 18px' }}
+                  onClick={handleLoadSample}
+                >
+                  Load Sample Document
                 </button>
               )}
             </div>
           </div>
 
-          {/* Phase 1 & 2 Stepper Track */}
+          {/* Sequential 2-Phase Progress Track */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-            {/* Phase 1 Step Node */}
+            {/* Phase 1 Stepper Node */}
             <div
-              onClick={() => doc && setActivePhase(1)}
+              onClick={() => setActivePhase(1)}
+              className={`neu-card ${activePhase === 1 ? 'phase-active-border' : ''}`}
               style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '12px',
-                padding: '14px 20px',
+                padding: '16px 20px',
                 borderRadius: '20px',
-                backgroundColor: 'var(--bg-surface)',
-                boxShadow: activePhase === 1 ? 'var(--shadow-inset), 0 0 0 2px var(--accent)' : 'var(--shadow-extruded-sm)',
-                cursor: doc ? 'pointer' : 'default',
-                transition: 'all 250ms ease',
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: '14px',
+                cursor: 'pointer',
               }}
             >
               <div
                 style={{
-                  width: '36px',
-                  height: '36px',
+                  width: '38px',
+                  height: '38px',
                   borderRadius: '50%',
                   backgroundColor: 'var(--bg-surface)',
-                  boxShadow: activePhase === 1 ? 'var(--shadow-accent-inset)' : 'var(--shadow-extruded-sm)',
+                  boxShadow: activePhase === 1 ? 'var(--shadow-inset)' : 'var(--shadow-extruded-sm)',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  color: activePhase === 1 ? 'var(--accent)' : 'var(--accent-secondary)',
+                  color: doc ? 'var(--accent-secondary)' : 'var(--accent)',
+                  flexShrink: 0,
                 }}
               >
-                {doc ? <Check size={18} strokeWidth={3} /> : <FileText size={18} />}
+                {doc ? <Check size={18} /> : <FileText size={18} />}
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column' }}>
-                <span style={{ fontFamily: 'var(--font-display)', fontSize: '0.9rem', fontWeight: 800, color: activePhase === 1 ? 'var(--accent)' : 'var(--fg-primary)' }}>
+              <div>
+                <div style={{ fontSize: '0.88rem', fontWeight: 800, color: 'var(--fg-primary)' }}>
                   Phase 1: Document Ingest & SHA-256 Digest
-                </span>
-                <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.72rem', color: 'var(--fg-muted)' }}>
-                  {doc ? `Root Anchored: ${doc.hashHex.substring(0, 16)}...` : 'Awaiting Document Upload'}
-                </span>
+                </div>
+                <div style={{ fontSize: '0.74rem', color: 'var(--fg-muted)', marginTop: '2px' }}>
+                  {doc ? `Root Anchored: ${doc.hashHex.substring(0, 18)}...` : 'Awaiting Document Upload'}
+                </div>
               </div>
             </div>
 
-            {/* Phase 2 Step Node */}
+            {/* Phase 2 Stepper Node */}
             <div
               onClick={() => doc && setActivePhase(2)}
+              className={`neu-card ${activePhase === 2 ? 'phase-active-border' : ''}`}
               style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '12px',
-                padding: '14px 20px',
+                padding: '16px 20px',
                 borderRadius: '20px',
-                backgroundColor: 'var(--bg-surface)',
-                boxShadow: activePhase === 2 ? 'var(--shadow-inset), 0 0 0 2px var(--accent)' : doc ? 'var(--shadow-extruded-sm)' : 'var(--shadow-inset-sm)',
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: '14px',
                 cursor: doc ? 'pointer' : 'not-allowed',
-                opacity: doc ? 1 : 0.55,
-                transition: 'all 250ms ease',
+                opacity: doc ? 1 : 0.6,
               }}
             >
               <div
                 style={{
-                  width: '36px',
-                  height: '36px',
+                  width: '38px',
+                  height: '38px',
                   borderRadius: '50%',
                   backgroundColor: 'var(--bg-surface)',
-                  boxShadow: activePhase === 2 ? 'var(--shadow-accent-inset)' : 'var(--shadow-extruded-sm)',
+                  boxShadow: activePhase === 2 ? 'var(--shadow-inset)' : 'var(--shadow-extruded-sm)',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  color: activePhase === 2 ? 'var(--accent)' : 'var(--accent-secondary)',
+                  color: detectedFields.length > 0 ? 'var(--accent)' : 'var(--fg-muted)',
+                  flexShrink: 0,
                 }}
               >
                 <Scan size={18} />
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column' }}>
-                <span style={{ fontFamily: 'var(--font-display)', fontSize: '0.9rem', fontWeight: 800, color: activePhase === 2 ? 'var(--accent)' : 'var(--fg-primary)' }}>
+              <div>
+                <div style={{ fontSize: '0.88rem', fontWeight: 800, color: 'var(--fg-primary)' }}>
                   Phase 2: OCR Detection & Coordinate Mapping
-                </span>
-                <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.72rem', color: 'var(--fg-muted)' }}>
-                  {activePhase === 2 ? '2 Bounding Coordinates Active' : doc ? 'Ready to Detect Coordinates' : 'Requires Ingested Document'}
-                </span>
+                </div>
+                <div style={{ fontSize: '0.74rem', color: 'var(--fg-muted)', marginTop: '2px' }}>
+                  {detectedFields.length > 0
+                    ? `${detectedFields.length} Spatial Bounding Coordinates Active`
+                    : doc ? 'Ready for Coordinate Analysis' : 'Requires Ingested Document'}
+                </div>
               </div>
             </div>
           </div>
 
-          {/* Phase 1 Architecture: Formatted 3-Column Visual Cards (No walls of text) */}
+          {/* Phase 1 Architecture: 3-Column Structured Breakdown */}
           {activePhase === 1 && (
             <div className="neu-card" style={{ padding: '24px 28px', borderRadius: '28px', gap: '16px' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
@@ -485,7 +485,6 @@ export function App() {
                 <span className="neu-hash-pill">ALGORITHM: FIPS 180-4</span>
               </div>
 
-              {/* 3 Structured Explanatory Columns */}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '16px' }}>
                 <div className="neu-well" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
                   <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase' }}>
@@ -517,7 +516,7 @@ export function App() {
             </div>
           )}
 
-          {/* Phase 2 Architecture: Formatted 3-Column Visual Cards */}
+          {/* Phase 2 Architecture: 3-Column Structured Breakdown */}
           {activePhase === 2 && (
             <div className="neu-card" style={{ padding: '24px 28px', borderRadius: '28px', gap: '16px' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
@@ -530,11 +529,13 @@ export function App() {
                       PHASE 2 ARCHITECTURE: OCR SPATIAL BOUNDING COORDINATES
                     </h3>
                     <p style={{ fontSize: '0.78rem', color: 'var(--fg-muted)' }}>
-                      Local canvas OCR parses exact pixel geometry $[x, y, w, h]$ to bind redaction zones to the document layout.
+                      Local spatial engine parses exact pixel geometry [x, y, w, h] to bind redaction zones to the document layout.
                     </p>
                   </div>
                 </div>
-                <span className="neu-hash-pill">ENGINE: CANVAS OCR</span>
+                <span className="neu-hash-pill">
+                  {ocrTelemetry ? ocrTelemetry.engineName : 'CLIENT SPATIAL ENGINE'}
+                </span>
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '16px' }}>
@@ -543,7 +544,7 @@ export function App() {
                     01. Coordinate Extraction
                   </div>
                   <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
-                    Maps exact sub-pixel boundaries $[x, y, w, h]$ for target financial claims and ancillary PII fields directly on the page.
+                    Extracts {extractedTokens.length} spatial text tokens directly from the document raster without transmitting a single byte outside RAM.
                   </p>
                 </div>
 
@@ -552,7 +553,13 @@ export function App() {
                     02. Enterprise Witness Matching
                   </div>
                   <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
-                    Evaluates the parsed value against the active Enterprise Spec: <strong>$145,000 &gt;= $100,000</strong> satisfies the predicate requirement.
+                    {witnessTarget ? (
+                      <>
+                        Evaluates parsed witness: <strong>{witnessTarget.extractedValue}</strong> against enterprise threshold <strong>&gt;= ${enterpriseSpec.thresholdValue.toLocaleString()} USD</strong>.
+                      </>
+                    ) : (
+                      'Evaluates parsed witness claims against active enterprise threshold criteria.'
+                    )}
                   </p>
                 </div>
 
@@ -561,7 +568,7 @@ export function App() {
                     03. Seal Geometry Anchor
                   </div>
                   <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
-                    These exact coordinates are later hashed into the Master Audit Seal. Moving the redaction box by 1 pixel invalidates the proof.
+                    Coordinates [x, y, w, h] are hashed directly into the Master Audit Seal. Shifting the redaction box by 1 pixel breaks proof validity.
                   </p>
                 </div>
               </div>
@@ -572,7 +579,7 @@ export function App() {
           <div
             style={{
               display: 'grid',
-              gridTemplateColumns: 'minmax(0, 1.1fr) minmax(0, 1fr)',
+              gridTemplateColumns: 'minmax(0, 1.15fr) minmax(0, 1fr)',
               gap: '20px',
               alignItems: 'stretch',
             }}
@@ -598,7 +605,7 @@ export function App() {
                       </button>
                     )}
                     <span className="neu-hash-pill" style={{ color: activePhase === 2 ? 'var(--accent)' : 'var(--accent-secondary)', fontWeight: 700 }}>
-                      {activePhase === 1 ? 'STAGE 1: RAW INGEST' : 'STAGE 2: OCR DETECTED'}
+                      {activePhase === 1 ? 'STAGE 1: RAW INGEST' : `STAGE 2: ${detectedFields.length} TARGETS`}
                     </span>
                   </div>
                 )}
@@ -662,7 +669,7 @@ export function App() {
                   </div>
                 </div>
               ) : (
-                /* Loaded Document Canvas */
+                /* Real Rendered Canvas */
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.78rem' }}>
                     <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, color: 'var(--fg-primary)' }}>
@@ -685,12 +692,12 @@ export function App() {
               )}
 
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.74rem', fontFamily: 'var(--font-mono)', color: 'var(--fg-muted)' }}>
-                <span>Spatial Engine: Canvas Pixel Coordinate Matrix</span>
+                <span>Spatial Engine: {ocrTelemetry ? ocrTelemetry.engineName : 'Native Canvas'}</span>
                 <span>Isolated RAM: Active</span>
               </div>
             </div>
 
-            {/* Right Panel: Telemetry Inspector */}
+            {/* Right Panel: Telemetry & Spatial Inspector */}
             <div className="neu-card" style={{ width: '100%', padding: '22px', gap: '16px' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -721,7 +728,7 @@ export function App() {
               {/* PHASE 1 VIEW IN TELEMETRY */}
               {activePhase === 1 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                  {/* 1. Preimage SHA-256 Digest Card */}
+                  {/* Preimage SHA-256 Digest Card */}
                   <div className="neu-well" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <span style={{ fontSize: '0.76rem', fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--accent)' }}>
@@ -765,7 +772,7 @@ export function App() {
                     )}
                   </div>
 
-                  {/* 2. Enterprise Verification Specification Simulator */}
+                  {/* Enterprise Verification Specification Simulator */}
                   <div className="neu-well" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -791,7 +798,12 @@ export function App() {
                             boxShadow: enterpriseSpec.thresholdValue === p.amount ? 'var(--shadow-inset-sm)' : 'var(--shadow-extruded-sm)',
                             fontWeight: enterpriseSpec.thresholdValue === p.amount ? 700 : 500,
                           }}
-                          onClick={() => setEnterpriseSpec((prev) => ({ ...prev, requesterName: p.req, targetField: p.field, thresholdValue: p.amount }))}
+                          onClick={() => {
+                            setEnterpriseSpec((prev) => ({ ...prev, requesterName: p.req, targetField: p.field, thresholdValue: p.amount }));
+                            if (extractedTokens.length > 0) {
+                              setDetectedFields(classifyExtractedTargets(extractedTokens, p.amount));
+                            }
+                          }}
                         >
                           {p.label}
                         </button>
@@ -823,7 +835,13 @@ export function App() {
                           className="neu-input"
                           style={{ padding: '10px 14px', fontSize: '0.8rem', fontWeight: 700 }}
                           value={enterpriseSpec.thresholdValue}
-                          onChange={(e) => setEnterpriseSpec({ ...enterpriseSpec, thresholdValue: Number(e.target.value) })}
+                          onChange={(e) => {
+                            const val = Number(e.target.value);
+                            setEnterpriseSpec({ ...enterpriseSpec, thresholdValue: val });
+                            if (extractedTokens.length > 0) {
+                              setDetectedFields(classifyExtractedTargets(extractedTokens, val));
+                            }
+                          }}
                         />
                       </div>
                     </div>
@@ -845,7 +863,7 @@ export function App() {
                   {doc && (
                     <button
                       className="neu-btn-primary"
-                      onClick={runOcrScan}
+                      onClick={() => setActivePhase(2)}
                       disabled={ocrRunning}
                       style={{ width: '100%', padding: '12px', fontSize: '0.88rem', gap: '8px' }}
                     >
@@ -859,101 +877,157 @@ export function App() {
               {/* PHASE 2 VIEW IN TELEMETRY */}
               {activePhase === 2 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                  {/* Target 1: The Witness Claim */}
-                  <div
-                    onClick={() => setSelectedFieldId('field_income')}
-                    className="neu-well"
-                    style={{
-                      padding: '16px',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '10px',
-                      cursor: 'pointer',
-                      boxShadow: selectedFieldId === 'field_income' ? 'var(--shadow-inset), 0 0 0 2px var(--accent)' : 'var(--shadow-inset)',
-                    }}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        <Crosshair size={16} style={{ color: 'var(--accent)' }} />
-                        <span style={{ fontSize: '0.84rem', fontWeight: 800, color: 'var(--fg-primary)' }}>
-                          Target 1: Financial Witness Claim
-                        </span>
+                  {/* Real Telemetry Bar */}
+                  {ocrTelemetry && (
+                    <div className="neu-well" style={{ padding: '10px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.74rem', fontFamily: 'var(--font-mono)' }}>
+                      <span style={{ color: 'var(--accent)', fontWeight: 700 }}>
+                        {ocrTelemetry.tokenCount} tokens parsed ({ocrTelemetry.latencyMs}ms)
+                      </span>
+                      <span style={{ color: 'var(--fg-muted)' }}>
+                        {detectedFields.length} target zones locked
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Dynamically Rendered Detected Fields */}
+                  {detectedFields.length === 0 ? (
+                    <div className="neu-well" style={{ padding: '24px', textAlign: 'center', color: 'var(--fg-muted)', fontSize: '0.82rem' }}>
+                      No targets auto-classified. Select tokens below or drag on canvas to define redaction regions.
+                    </div>
+                  ) : (
+                    detectedFields.map((field, idx) => {
+                      const isSelected = selectedFieldId === field.id;
+                      const isWitness = field.action === 'PROVE_AND_BURN';
+                      return (
+                        <div
+                          key={field.id}
+                          onClick={() => setSelectedFieldId(field.id)}
+                          className="neu-well"
+                          style={{
+                            padding: '16px',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '10px',
+                            cursor: 'pointer',
+                            boxShadow: isSelected
+                              ? (isWitness ? 'var(--shadow-inset), 0 0 0 2px var(--accent)' : 'var(--shadow-inset), 0 0 0 2px var(--accent-secondary)')
+                              : 'var(--shadow-inset)',
+                          }}
+                        >
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <Crosshair size={16} style={{ color: isWitness ? 'var(--accent)' : 'var(--accent-secondary)' }} />
+                              <span style={{ fontSize: '0.84rem', fontWeight: 800, color: 'var(--fg-primary)' }}>
+                                Target {idx + 1}: {field.label}
+                              </span>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <span
+                                className="neu-claim-badge"
+                                style={{
+                                  backgroundColor: isWitness ? 'rgba(234, 88, 12, 0.12)' : 'rgba(13, 148, 136, 0.12)',
+                                  color: isWitness ? 'var(--accent)' : 'var(--accent-secondary)',
+                                }}
+                              >
+                                {isWitness ? 'ZK PROVE & BURN' : 'DIRECT REDACTION'}
+                              </span>
+                              {field.source === 'MANUAL_USER' && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleRemoveTarget(field.id);
+                                  }}
+                                  style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-muted)' }}
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+                              )}
+                            </div>
+                          </div>
+
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ fontSize: '0.8rem', color: 'var(--fg-muted)' }}>Extracted Text:</span>
+                            <span className="neu-secret-badge" style={{ color: isWitness ? 'var(--accent)' : 'inherit', fontWeight: 700 }}>
+                              {field.extractedValue}
+                            </span>
+                          </div>
+
+                          {isWitness && (
+                            <>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <span style={{ fontSize: '0.8rem', color: 'var(--fg-muted)' }}>Enterprise Threshold:</span>
+                                <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8rem', fontWeight: 700 }}>
+                                  &gt;= ${enterpriseSpec.thresholdValue.toLocaleString()} USD
+                                </span>
+                              </div>
+
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <span style={{ fontSize: '0.8rem', color: 'var(--fg-muted)' }}>Condition Satisfied:</span>
+                                <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8rem', fontWeight: 800, color: (field.numericValue || 0) >= enterpriseSpec.thresholdValue ? 'var(--accent-secondary)' : '#DC2626' }}>
+                                  {(field.numericValue || 0) >= enterpriseSpec.thresholdValue
+                                    ? `TRUE ($${((field.numericValue || 0) / 1000).toFixed(0)}k >= $${(enterpriseSpec.thresholdValue / 1000).toFixed(0)}k)`
+                                    : `FALSE ($${((field.numericValue || 0) / 1000).toFixed(0)}k < $${(enterpriseSpec.thresholdValue / 1000).toFixed(0)}k)`}
+                                </span>
+                              </div>
+                            </>
+                          )}
+
+                          {!isWitness && (
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <span style={{ fontSize: '0.8rem', color: 'var(--fg-muted)' }}>Classification:</span>
+                              <span style={{ fontSize: '0.78rem', color: 'var(--fg-muted)' }}>
+                                {field.classification}
+                              </span>
+                            </div>
+                          )}
+
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.74rem', fontFamily: 'var(--font-mono)', color: 'var(--fg-muted)', borderTop: '1px solid rgba(0,0,0,0.06)', paddingTop: '6px' }}>
+                            <span>Bounding Coords: [x: {field.x}, y: {field.y}, w: {field.width}, h: {field.height}]</span>
+                            <span>Page {field.page}</span>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+
+                  {/* Token Explorer Drawer Toggle */}
+                  <div className="neu-well" style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    <div
+                      onClick={() => setShowAllTokens(!showAllTokens)}
+                      style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }}
+                    >
+                      <span style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--fg-primary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <SlidersHorizontal size={14} style={{ color: 'var(--accent)' }} />
+                        <span>Document Token Index ({extractedTokens.length} detected)</span>
+                      </span>
+                      <ChevronDown
+                        size={15}
+                        style={{
+                          transform: showAllTokens ? 'rotate(180deg)' : 'none',
+                          transition: 'transform 0.2s ease',
+                          color: 'var(--fg-muted)',
+                        }}
+                      />
+                    </div>
+
+                    {showAllTokens && (
+                      <div style={{ maxHeight: '160px', overflowY: 'auto', display: 'flex', flexWrap: 'wrap', gap: '6px', paddingTop: '6px' }}>
+                        {extractedTokens.map((t) => (
+                          <button
+                            key={t.id}
+                            type="button"
+                            className="neu-pill-btn"
+                            style={{ fontSize: '0.72rem', padding: '3px 8px', display: 'flex', alignItems: 'center', gap: '4px' }}
+                            onClick={() => handleAddTokenAsTarget(t)}
+                            title={`Click to redact: [x:${t.x}, y:${t.y}, w:${t.width}, h:${t.height}]`}
+                          >
+                            <span>{t.text}</span>
+                            <Plus size={10} />
+                          </button>
+                        ))}
                       </div>
-                      <span className="neu-claim-badge" style={{ backgroundColor: 'rgba(234, 88, 12, 0.12)', color: 'var(--accent)' }}>
-                        ZK PROVE & BURN
-                      </span>
-                    </div>
-
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ fontSize: '0.8rem', color: 'var(--fg-muted)' }}>Extracted Text:</span>
-                      <span className="neu-secret-badge" style={{ color: 'var(--accent)', fontWeight: 700 }}>
-                        $145,000 USD
-                      </span>
-                    </div>
-
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ fontSize: '0.8rem', color: 'var(--fg-muted)' }}>Enterprise Threshold:</span>
-                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8rem', fontWeight: 700 }}>
-                        &gt;= ${enterpriseSpec.thresholdValue.toLocaleString()} USD
-                      </span>
-                    </div>
-
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ fontSize: '0.8rem', color: 'var(--fg-muted)' }}>Condition Satisfied:</span>
-                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8rem', fontWeight: 800, color: 'var(--accent-secondary)' }}>
-                        TRUE ($145k &gt;= ${enterpriseSpec.thresholdValue / 1000}k)
-                      </span>
-                    </div>
-
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.74rem', fontFamily: 'var(--font-mono)', color: 'var(--fg-muted)', borderTop: '1px solid rgba(0,0,0,0.06)', paddingTop: '6px' }}>
-                      <span>Bounding Coords: [x: 222, y: 244, w: 110, h: 22]</span>
-                      <span>Page 1</span>
-                    </div>
-                  </div>
-
-                  {/* Target 2: Ancillary PII (SSN) */}
-                  <div
-                    onClick={() => setSelectedFieldId('field_ssn')}
-                    className="neu-well"
-                    style={{
-                      padding: '16px',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '10px',
-                      cursor: 'pointer',
-                      boxShadow: selectedFieldId === 'field_ssn' ? 'var(--shadow-inset), 0 0 0 2px var(--accent-secondary)' : 'var(--shadow-inset)',
-                    }}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        <Crosshair size={16} style={{ color: 'var(--accent-secondary)' }} />
-                        <span style={{ fontSize: '0.84rem', fontWeight: 800, color: 'var(--fg-primary)' }}>
-                          Target 2: Ancillary Government Identifier
-                        </span>
-                      </div>
-                      <span className="neu-claim-badge" style={{ backgroundColor: 'rgba(13, 148, 136, 0.12)', color: 'var(--accent-secondary)' }}>
-                        DIRECT REDACTION
-                      </span>
-                    </div>
-
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ fontSize: '0.8rem', color: 'var(--fg-muted)' }}>Extracted Raw Value:</span>
-                      <span className="neu-secret-badge">
-                        459-00-8812
-                      </span>
-                    </div>
-
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ fontSize: '0.8rem', color: 'var(--fg-muted)' }}>Classification:</span>
-                      <span style={{ fontSize: '0.78rem', color: 'var(--fg-muted)' }}>
-                        Sensitive Identity PII (SSN)
-                      </span>
-                    </div>
-
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.74rem', fontFamily: 'var(--font-mono)', color: 'var(--fg-muted)', borderTop: '1px solid rgba(0,0,0,0.06)', paddingTop: '6px' }}>
-                      <span>Bounding Coords: [x: 182, y: 138, w: 124, h: 22]</span>
-                      <span>Page 1</span>
-                    </div>
+                    )}
                   </div>
 
                   {/* Phase 2 Operational Confirmation */}
@@ -961,10 +1035,10 @@ export function App() {
                     <CheckCircle2 size={20} style={{ color: 'var(--accent-secondary)', flexShrink: 0 }} />
                     <div>
                       <div style={{ fontSize: '0.82rem', fontWeight: 800, color: 'var(--accent-secondary)' }}>
-                        Phase 2 Operational: Coordinates Locked & Witness Bound
+                        Phase 2 Operational: {detectedFields.length} Spatial Target Zones Bound
                       </div>
                       <div style={{ fontSize: '0.74rem', color: 'var(--fg-muted)', marginTop: '2px' }}>
-                        Both spatial bounding boxes are ready for Phase 3: Irreversible Pixel Burning & Text Stream Stripping.
+                        All spatial bounding boxes are derived directly from document geometry, ready for Phase 3: Irreversible Pixel Burning.
                       </div>
                     </div>
                   </div>
