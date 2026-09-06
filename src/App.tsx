@@ -606,30 +606,9 @@ export function App() {
             {/* Phase 1 Stepper Node */}
             <div
               onClick={() => setActivePhase(1)}
-              className={`neu-card ${activePhase === 1 ? 'phase-active-border' : ''}`}
-              style={{
-                padding: '14px 16px',
-                borderRadius: '18px',
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: '12px',
-                cursor: 'pointer',
-              }}
+              className={`neu-step-node ${activePhase === 1 ? 'active' : ''}`}
             >
-              <div
-                style={{
-                  width: '34px',
-                  height: '34px',
-                  borderRadius: '50%',
-                  backgroundColor: 'var(--bg-surface)',
-                  boxShadow: activePhase === 1 ? 'var(--shadow-inset)' : 'var(--shadow-extruded-sm)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  color: doc ? 'var(--accent-secondary)' : 'var(--accent)',
-                  flexShrink: 0,
-                }}
-              >
+              <div className="neu-step-icon-well" style={{ color: doc ? 'var(--accent-secondary)' : 'var(--accent)' }}>
                 {doc ? <Check size={16} /> : <FileText size={16} />}
               </div>
               <div style={{ minWidth: 0 }}>
@@ -645,32 +624,10 @@ export function App() {
             {/* Phase 2 Stepper Node */}
             <div
               onClick={() => doc && setActivePhase(2)}
-              className={`neu-card ${activePhase === 2 ? 'phase-active-border' : ''}`}
-              style={{
-                padding: '14px 16px',
-                borderRadius: '18px',
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: '12px',
-                cursor: doc ? 'pointer' : 'not-allowed',
-                opacity: doc ? 1 : 0.6,
-              }}
+              className={`neu-step-node ${activePhase === 2 ? 'active' : ''} ${!doc ? 'disabled' : ''}`}
             >
-              <div
-                style={{
-                  width: '34px',
-                  height: '34px',
-                  borderRadius: '50%',
-                  backgroundColor: 'var(--bg-surface)',
-                  boxShadow: activePhase === 2 ? 'var(--shadow-inset)' : 'var(--shadow-extruded-sm)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  color: detectedFields.length > 0 ? 'var(--accent)' : 'var(--fg-muted)',
-                  flexShrink: 0,
-                }}
-              >
-                <Scan size={16} />
+              <div className="neu-step-icon-well" style={{ color: detectedFields.length > 0 ? (activePhase === 2 ? 'var(--accent)' : 'var(--accent-secondary)') : 'var(--fg-muted)' }}>
+                {detectedFields.length > 0 && activePhase !== 2 ? <Check size={16} /> : <Scan size={16} />}
               </div>
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontSize: '0.82rem', fontWeight: 800, color: 'var(--fg-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -687,32 +644,10 @@ export function App() {
             {/* Phase 3 Stepper Node */}
             <div
               onClick={() => redactionResult && setActivePhase(3)}
-              className={`neu-card ${activePhase === 3 ? 'phase-active-border-rose' : ''}`}
-              style={{
-                padding: '14px 16px',
-                borderRadius: '18px',
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: '12px',
-                cursor: redactionResult ? 'pointer' : 'not-allowed',
-                opacity: redactionResult ? 1 : (detectedFields.length > 0 ? 0.8 : 0.5),
-              }}
+              className={`neu-step-node ${activePhase === 3 ? 'active' : ''} ${!redactionResult ? 'disabled' : ''}`}
             >
-              <div
-                style={{
-                  width: '34px',
-                  height: '34px',
-                  borderRadius: '50%',
-                  backgroundColor: 'var(--bg-surface)',
-                  boxShadow: activePhase === 3 ? 'var(--shadow-inset)' : 'var(--shadow-extruded-sm)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  color: redactionResult ? '#DC2626' : 'var(--fg-muted)',
-                  flexShrink: 0,
-                }}
-              >
-                <Flame size={16} />
+              <div className="neu-step-icon-well" style={{ color: redactionResult ? (activePhase === 3 ? 'var(--accent)' : 'var(--accent-secondary)') : 'var(--fg-muted)' }}>
+                {redactionResult && activePhase !== 3 ? <Check size={16} /> : <Flame size={16} />}
               </div>
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontSize: '0.82rem', fontWeight: 800, color: 'var(--fg-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -728,33 +663,11 @@ export function App() {
 
             {/* Phase 4 Stepper Node */}
             <div
-              onClick={() => proofResult && setActivePhase(4)}
-              className={`neu-card ${activePhase === 4 ? 'phase-active-border' : ''}`}
-              style={{
-                padding: '14px 16px',
-                borderRadius: '18px',
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: '12px',
-                cursor: proofResult ? 'pointer' : (redactionResult ? 'pointer' : 'not-allowed'),
-                opacity: proofResult ? 1 : (redactionResult ? 0.8 : 0.5),
-              }}
+              onClick={() => (proofResult || redactionResult) && setActivePhase(4)}
+              className={`neu-step-node ${activePhase === 4 ? 'active' : ''} ${!redactionResult ? 'disabled' : ''}`}
             >
-              <div
-                style={{
-                  width: '34px',
-                  height: '34px',
-                  borderRadius: '50%',
-                  backgroundColor: 'var(--bg-surface)',
-                  boxShadow: activePhase === 4 ? 'var(--shadow-inset)' : 'var(--shadow-extruded-sm)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  color: proofResult ? '#7C3AED' : 'var(--fg-muted)',
-                  flexShrink: 0,
-                }}
-              >
-                <Cpu size={16} />
+              <div className="neu-step-icon-well" style={{ color: proofResult ? (activePhase === 4 ? 'var(--accent)' : 'var(--accent-secondary)') : 'var(--fg-muted)' }}>
+                {proofResult && activePhase !== 4 ? <Check size={16} /> : <Cpu size={16} />}
               </div>
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontSize: '0.82rem', fontWeight: 800, color: 'var(--fg-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -768,33 +681,11 @@ export function App() {
 
             {/* Phase 5 Stepper Node */}
             <div
-              onClick={() => masterSeal && setActivePhase(5)}
-              className={`neu-card ${activePhase === 5 ? 'phase-active-border-teal' : ''}`}
-              style={{
-                padding: '14px 16px',
-                borderRadius: '18px',
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: '12px',
-                cursor: masterSeal ? 'pointer' : (proofResult ? 'pointer' : 'not-allowed'),
-                opacity: masterSeal ? 1 : (proofResult ? 0.8 : 0.5),
-              }}
+              onClick={() => (masterSeal || proofResult) && setActivePhase(5)}
+              className={`neu-step-node ${activePhase === 5 ? 'active' : ''} ${!proofResult ? 'disabled' : ''}`}
             >
-              <div
-                style={{
-                  width: '34px',
-                  height: '34px',
-                  borderRadius: '50%',
-                  backgroundColor: 'var(--bg-surface)',
-                  boxShadow: activePhase === 5 ? 'var(--shadow-inset)' : 'var(--shadow-extruded-sm)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  color: masterSeal ? 'var(--accent-secondary)' : 'var(--fg-muted)',
-                  flexShrink: 0,
-                }}
-              >
-                <Fingerprint size={16} />
+              <div className="neu-step-icon-well" style={{ color: masterSeal ? 'var(--accent-secondary)' : 'var(--fg-muted)' }}>
+                {masterSeal ? <Check size={16} /> : <Fingerprint size={16} />}
               </div>
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontSize: '0.82rem', fontWeight: 800, color: 'var(--fg-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -922,7 +813,7 @@ export function App() {
             <div className="neu-card" style={{ padding: '24px 28px', borderRadius: '28px', gap: '16px' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <div style={{ width: '32px', height: '32px', borderRadius: '50%', backgroundColor: 'var(--bg-surface)', boxShadow: 'var(--shadow-inset-sm)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#DC2626' }}>
+                  <div style={{ width: '32px', height: '32px', borderRadius: '50%', backgroundColor: 'var(--bg-surface)', boxShadow: 'var(--shadow-inset-sm)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--accent)' }}>
                     <Flame size={18} />
                   </div>
                   <div>
@@ -934,12 +825,12 @@ export function App() {
                     </p>
                   </div>
                 </div>
-                <span className="neu-hash-pill" style={{ color: '#DC2626' }}>ENGINE: RASTER FLATTEN + SHA-256</span>
+                <span className="neu-hash-pill">ENGINE: RASTER FLATTEN + SHA-256</span>
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '16px' }}>
                 <div className="neu-well" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: '#DC2626', textTransform: 'uppercase' }}>
+                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase' }}>
                     01. Physical Memory Overwrite
                   </div>
                   <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
@@ -948,7 +839,7 @@ export function App() {
                 </div>
 
                 <div className="neu-well" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: '#DC2626', textTransform: 'uppercase' }}>
+                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase' }}>
                     02. Stream & Glyph Obliteration
                   </div>
                   <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
@@ -957,7 +848,7 @@ export function App() {
                 </div>
 
                 <div className="neu-well" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: '#DC2626', textTransform: 'uppercase' }}>
+                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase' }}>
                     03. Sanitized Preimage H(Doc_Redacted)
                   </div>
                   <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
@@ -973,7 +864,7 @@ export function App() {
             <div className="neu-card" style={{ padding: '24px 28px', borderRadius: '28px', gap: '16px' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <div style={{ width: '32px', height: '32px', borderRadius: '50%', backgroundColor: 'var(--bg-surface)', boxShadow: 'var(--shadow-inset-sm)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#7C3AED' }}>
+                  <div style={{ width: '32px', height: '32px', borderRadius: '50%', backgroundColor: 'var(--bg-surface)', boxShadow: 'var(--shadow-inset-sm)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--accent)' }}>
                     <Cpu size={18} />
                   </div>
                   <div>
@@ -985,12 +876,12 @@ export function App() {
                     </p>
                   </div>
                 </div>
-                <span className="neu-hash-pill" style={{ color: '#7C3AED' }}>ENGINE: CIRCOM + SNARKJS (BN128 GROTH16)</span>
+                <span className="neu-hash-pill">ENGINE: CIRCOM + SNARKJS (BN128 GROTH16)</span>
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '16px' }}>
                 <div className="neu-well" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: '#7C3AED', textTransform: 'uppercase' }}>
+                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase' }}>
                     01. Private Witness Blinding
                   </div>
                   <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
@@ -999,7 +890,7 @@ export function App() {
                 </div>
 
                 <div className="neu-well" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: '#7C3AED', textTransform: 'uppercase' }}>
+                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase' }}>
                     02. In-Browser Groth16 Prover
                   </div>
                   <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
@@ -1008,7 +899,7 @@ export function App() {
                 </div>
 
                 <div className="neu-well" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: '#7C3AED', textTransform: 'uppercase' }}>
+                  <div style={{ fontSize: '0.74rem', fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase' }}>
                     03. Poseidon Pedersen Commitment
                   </div>
                   <p style={{ fontSize: '0.84rem', color: 'var(--fg-primary)', lineHeight: '1.5' }}>
@@ -1083,7 +974,7 @@ export function App() {
             <div className="neu-card" style={{ width: '100%', padding: '22px', gap: '14px' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <FileText size={18} style={{ color: activePhase === 3 ? '#DC2626' : 'var(--accent)' }} />
+                  <FileText size={18} style={{ color: 'var(--accent)' }} />
                   <span style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: '0.96rem' }}>
                     Document Viewport
                   </span>
@@ -1107,7 +998,7 @@ export function App() {
                           style={{ fontSize: '0.72rem', padding: '4px 10px', display: 'flex', alignItems: 'center', gap: '4px' }}
                           onClick={() => setViewMode('BURNED')}
                         >
-                          <Flame size={12} style={{ color: '#DC2626' }} />
+                          <Flame size={12} style={{ color: 'var(--accent)' }} />
                           <span>Burned Raster</span>
                         </button>
                         <button
@@ -1121,7 +1012,7 @@ export function App() {
                       </div>
                     )}
 
-                    <span className="neu-hash-pill" style={{ color: activePhase === 5 ? 'var(--accent-secondary)' : (activePhase === 4 ? '#7C3AED' : (activePhase === 3 ? '#DC2626' : (activePhase === 2 ? 'var(--accent)' : 'var(--accent-secondary)'))), fontWeight: 700 }}>
+                    <span className="neu-hash-pill" style={{ color: activePhase === 5 ? 'var(--accent-secondary)' : 'var(--accent)', fontWeight: 700 }}>
                       {activePhase === 1 && 'STAGE 1: RAW INGEST'}
                       {activePhase === 2 && `STAGE 2: ${detectedFields.length} TARGETS`}
                       {activePhase === 3 && 'STAGE 3: PIXEL BURNED & FLATTENED'}
@@ -1142,21 +1033,8 @@ export function App() {
                   if (e.dataTransfer.files?.[0]) handleFileUpload(e.dataTransfer.files[0]);
                 }}
                 onClick={() => fileInputRef.current?.click()}
-                className="neu-well-deep"
-                style={{
-                  minHeight: '420px',
-                  display: doc ? 'none' : 'flex',
-                  flexDirection: 'column',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  textAlign: 'center',
-                  cursor: 'pointer',
-                  padding: '36px 20px',
-                  border: isDragging ? '2px dashed var(--accent)' : '2px dashed #C4CCD8',
-                  borderRadius: '24px',
-                  backgroundColor: isDragging ? 'rgba(234, 88, 12, 0.05)' : 'var(--bg-surface)',
-                  gap: '16px',
-                }}
+                className={`neu-dropzone ${isDragging ? 'dragging' : ''}`}
+                style={{ display: doc ? 'none' : 'flex' }}
               >
                 <div style={{ width: '64px', height: '64px', borderRadius: '50%', backgroundColor: 'var(--bg-surface)', boxShadow: 'var(--shadow-extruded)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--accent)' }}>
                   <UploadCloud size={32} />
@@ -1238,7 +1116,7 @@ export function App() {
             <div className="neu-card" style={{ width: '100%', padding: '22px', gap: '16px' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <ShieldCheck size={18} style={{ color: activePhase === 5 ? 'var(--accent-secondary)' : (activePhase === 4 ? '#7C3AED' : (activePhase === 3 ? '#DC2626' : 'var(--accent)')) }} />
+                  <ShieldCheck size={18} style={{ color: activePhase === 5 ? 'var(--accent-secondary)' : 'var(--accent)' }} />
                   <span style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: '0.96rem' }}>
                     {activePhase === 1 && 'Phase 1 Cryptographic Telemetry'}
                     {activePhase === 2 && 'Phase 2 OCR Spatial Telemetry'}
@@ -1474,9 +1352,7 @@ export function App() {
                             flexDirection: 'column',
                             gap: '10px',
                             cursor: 'pointer',
-                            boxShadow: isSelected
-                              ? (isWitness ? 'var(--shadow-inset), 0 0 0 2px var(--accent)' : 'var(--shadow-inset), 0 0 0 2px var(--accent-secondary)')
-                              : 'var(--shadow-inset)',
+                            boxShadow: isSelected ? 'var(--shadow-inset)' : 'var(--shadow-extruded-sm)',
                           }}
                         >
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -1490,7 +1366,6 @@ export function App() {
                               <span
                                 className="neu-claim-badge"
                                 style={{
-                                  backgroundColor: isWitness ? 'rgba(234, 88, 12, 0.12)' : 'rgba(13, 148, 136, 0.12)',
                                   color: isWitness ? 'var(--accent)' : 'var(--accent-secondary)',
                                 }}
                               >
@@ -1529,7 +1404,7 @@ export function App() {
 
                               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                 <span style={{ fontSize: '0.8rem', color: 'var(--fg-muted)' }}>Condition Satisfied:</span>
-                                <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8rem', fontWeight: 800, color: (field.numericValue || 0) >= enterpriseSpec.thresholdValue ? 'var(--accent-secondary)' : '#DC2626' }}>
+                                <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8rem', fontWeight: 800, color: (field.numericValue || 0) >= enterpriseSpec.thresholdValue ? 'var(--accent-secondary)' : 'var(--fg-muted)' }}>
                                   {(field.numericValue || 0) >= enterpriseSpec.thresholdValue
                                     ? `TRUE ($${((field.numericValue || 0) / 1000).toFixed(0)}k >= $${(enterpriseSpec.thresholdValue / 1000).toFixed(0)}k)`
                                     : `FALSE ($${((field.numericValue || 0) / 1000).toFixed(0)}k < $${(enterpriseSpec.thresholdValue / 1000).toFixed(0)}k)`}
@@ -1547,7 +1422,7 @@ export function App() {
                             </div>
                           )}
 
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.74rem', fontFamily: 'var(--font-mono)', color: 'var(--fg-muted)', borderTop: '1px solid rgba(0,0,0,0.06)', paddingTop: '6px' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.74rem', fontFamily: 'var(--font-mono)', color: 'var(--fg-muted)', marginTop: '4px' }}>
                             <span>Bounding Coords: [x: {field.x}, y: {field.y}, w: {field.width}, h: {field.height}]</span>
                             <span>Page {field.page}</span>
                           </div>
@@ -1600,7 +1475,7 @@ export function App() {
                     className="neu-btn-primary"
                     onClick={executePixelBurn}
                     disabled={isBurning || detectedFields.length === 0}
-                    style={{ width: '100%', padding: '12px', fontSize: '0.88rem', gap: '8px', backgroundColor: '#DC2626' }}
+                    style={{ width: '100%', padding: '12px', fontSize: '0.88rem', gap: '8px' }}
                   >
                     <Flame size={16} />
                     <span>{isBurning ? 'Burning Pixels & Stripping Streams...' : 'Execute Phase 3: Physical Pixel Burn & Flatten'}</span>
@@ -1615,7 +1490,7 @@ export function App() {
                   {/* Redacted SHA-256 Preimage H(Doc_Redacted) */}
                   <div className="neu-well" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ fontSize: '0.76rem', fontFamily: 'var(--font-mono)', fontWeight: 700, color: '#DC2626' }}>
+                      <span style={{ fontSize: '0.76rem', fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--accent)' }}>
                         REDACTED PREIMAGE SHA-256 H(Doc_Redacted):
                       </span>
                       <button
@@ -1661,7 +1536,7 @@ export function App() {
                           Non-Extractable Sanitization Verification
                         </span>
                       </div>
-                      <span className="neu-claim-badge" style={{ backgroundColor: 'rgba(13, 148, 136, 0.12)', color: 'var(--accent-secondary)' }}>
+                      <span className="neu-claim-badge" style={{ color: 'var(--accent-secondary)' }}>
                         VERIFIED ZERO LEAK
                       </span>
                     </div>
@@ -1683,7 +1558,7 @@ export function App() {
 
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <span style={{ color: 'var(--fg-muted)' }}>Obliterated Targets:</span>
-                        <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 800, color: '#DC2626' }}>
+                        <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)' }}>
                           {redactionResult.burnedZonesCount} Zones Destroyed
                         </span>
                       </div>
@@ -1703,7 +1578,7 @@ export function App() {
                       className="neu-btn-primary"
                       onClick={executeZkProof}
                       disabled={isProving}
-                      style={{ width: '100%', padding: '12px', fontSize: '0.88rem', gap: '8px', backgroundColor: '#7C3AED' }}
+                      style={{ width: '100%', padding: '12px', fontSize: '0.88rem', gap: '8px' }}
                     >
                       <Cpu size={16} className={isProving ? 'spin' : ''} />
                       <span>{isProving ? 'Compiling In-Browser Groth16 Proof...' : 'Proceed to Phase 4: ZK Prover Engine'}</span>
@@ -1729,12 +1604,12 @@ export function App() {
                   <div className="neu-well" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        <Lock size={15} style={{ color: '#7C3AED' }} />
+                        <Lock size={15} style={{ color: 'var(--accent)' }} />
                         <span style={{ fontSize: '0.78rem', fontWeight: 800, color: 'var(--fg-primary)' }}>
                           Confidential Witness & Enterprise Predicate
                         </span>
                       </div>
-                      <span className="neu-claim-badge" style={{ backgroundColor: 'rgba(124, 58, 237, 0.12)', color: '#7C3AED' }}>
+                      <span className="neu-claim-badge">
                         CIRCOM WITNESS ISOLATE
                       </span>
                     </div>
@@ -1752,7 +1627,7 @@ export function App() {
                       </div>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <span style={{ color: 'var(--fg-muted)' }}>Private Witness in RAM:</span>
-                        <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 800, color: '#7C3AED' }}>
+                        <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)' }}>
                           USD {(witnessTarget?.numericValue || 145000).toLocaleString()} (NEVER EXPOSED)
                         </span>
                       </div>
@@ -1771,7 +1646,7 @@ export function App() {
                       className="neu-btn-primary"
                       onClick={executeZkProof}
                       disabled={isProving}
-                      style={{ width: '100%', padding: '13px', fontSize: '0.88rem', gap: '8px', backgroundColor: '#7C3AED' }}
+                      style={{ width: '100%', padding: '13px', fontSize: '0.88rem', gap: '8px' }}
                     >
                       <Cpu size={16} className={isProving ? 'spin' : ''} />
                       <span>{isProving ? 'Evaluating Circom R1CS Constraints in WASM...' : 'Generate In-Browser Groth16 Proof'}</span>
@@ -1781,10 +1656,10 @@ export function App() {
                       {/* Poseidon Commitment Public Signal Card */}
                       <div className="neu-well" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <span style={{ fontSize: '0.76rem', fontFamily: 'var(--font-mono)', fontWeight: 700, color: '#7C3AED' }}>
+                          <span style={{ fontSize: '0.76rem', fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--accent)' }}>
                             POSEIDON COMMITMENT C = H(actual, r):
                           </span>
-                          <span className="neu-hash-pill" style={{ color: '#7C3AED' }}>BN254 SCALAR</span>
+                          <span className="neu-hash-pill">BN254 SCALAR</span>
                         </div>
                         <div
                           style={{
@@ -1813,7 +1688,7 @@ export function App() {
                       <div className="neu-well" style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                            <Binary size={15} style={{ color: '#7C3AED' }} />
+                            <Binary size={15} style={{ color: 'var(--accent)' }} />
                             <span style={{ fontSize: '0.78rem', fontWeight: 800, color: 'var(--fg-primary)' }}>
                               Groth16 Proof Points (&pi;_a, &pi;_b, &pi;_c)
                             </span>
@@ -1852,12 +1727,12 @@ export function App() {
                         </div>
 
                         {/* Local In-Browser Verification Soundness Status */}
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 12px', backgroundColor: 'rgba(13, 148, 136, 0.08)', borderRadius: '10px', border: '1px solid rgba(13, 148, 136, 0.25)' }}>
+                        <div className="neu-verified-well">
                           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.78rem', color: 'var(--accent-secondary)', fontWeight: 700 }}>
                             <CheckCircle2 size={16} />
                             <span>Proof Verified Sound in Local WASM Sandbox ({proofVerifyLatencyMs ?? 25}ms)</span>
                           </div>
-                          <span className="neu-claim-badge" style={{ backgroundColor: 'rgba(13, 148, 136, 0.15)', color: 'var(--accent-secondary)' }}>
+                          <span className="neu-claim-badge" style={{ color: 'var(--accent-secondary)' }}>
                             VALIDATED
                           </span>
                         </div>
@@ -1869,7 +1744,7 @@ export function App() {
                           className="neu-btn-primary"
                           onClick={executeMasterSeal}
                           disabled={isSealing}
-                          style={{ width: '100%', padding: '13px', fontSize: '0.88rem', gap: '8px', backgroundColor: 'var(--accent-secondary)' }}
+                          style={{ width: '100%', padding: '13px', fontSize: '0.88rem', gap: '8px' }}
                         >
                           <Fingerprint size={16} className={isSealing ? 'spin' : ''} />
                           <span>{isSealing ? 'Welding Cryptographic Factors...' : 'Execute Phase 5: Master Audit Seal & Package'}</span>
@@ -1962,7 +1837,7 @@ export function App() {
                           Verifier Simulator (Enterprise Auditor Perspective)
                         </span>
                       </div>
-                      <span className="neu-claim-badge" style={{ backgroundColor: 'rgba(13, 148, 136, 0.12)', color: 'var(--accent-secondary)' }}>
+                      <span className="neu-claim-badge" style={{ color: 'var(--accent-secondary)' }}>
                         ZERO PRIVACY LEAK
                       </span>
                     </div>
@@ -1988,35 +1863,33 @@ export function App() {
                         className="neu-btn-secondary"
                         onClick={() => simulateAuditVerification(true)}
                         disabled={isAuditing || !auditPackage}
-                        style={{ fontSize: '0.76rem', padding: '8px 10px', gap: '4px', color: '#DC2626' }}
+                        style={{ fontSize: '0.76rem', padding: '8px 10px', gap: '4px' }}
                       >
-                        <AlertTriangle size={13} />
+                        <AlertTriangle size={13} style={{ color: 'var(--accent)' }} />
                         <span>Simulate 1-px Tamper</span>
                       </button>
                     </div>
 
                     {auditCheckResult && (
                       <div
+                        className="neu-well"
                         style={{
-                          padding: '10px 12px',
-                          borderRadius: '10px',
-                          backgroundColor: auditCheckResult.sealValid ? 'rgba(13, 148, 136, 0.08)' : 'rgba(220, 38, 38, 0.08)',
-                          border: `1px solid ${auditCheckResult.sealValid ? 'rgba(13, 148, 136, 0.3)' : 'rgba(220, 38, 38, 0.3)'}`,
+                          padding: '12px 14px',
                           fontSize: '0.76rem',
                           display: 'flex',
                           flexDirection: 'column',
-                          gap: '4px',
+                          gap: '6px',
                         }}
                       >
                         <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 700 }}>
                           <span>Master Seal Cryptographic Match:</span>
-                          <span style={{ color: auditCheckResult.sealValid ? 'var(--accent-secondary)' : '#DC2626' }}>
+                          <span style={{ color: auditCheckResult.sealValid ? 'var(--accent-secondary)' : 'var(--fg-muted)' }}>
                             {auditCheckResult.sealValid ? 'VERIFIED (100% MATCH)' : 'FAILED (GEOMETRY TAMPER DETECTED)'}
                           </span>
                         </div>
                         <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 700 }}>
                           <span>Groth16 zk-SNARK Validity:</span>
-                          <span style={{ color: auditCheckResult.proofValid ? 'var(--accent-secondary)' : '#DC2626' }}>
+                          <span style={{ color: auditCheckResult.proofValid ? 'var(--accent-secondary)' : 'var(--fg-muted)' }}>
                             {auditCheckResult.proofValid ? 'TRUE (SOUNDNESS CONFIRMED)' : 'INVALID'}
                           </span>
                         </div>
@@ -2034,7 +1907,7 @@ export function App() {
                       className="neu-btn-primary"
                       onClick={handleDownloadAuditPackage}
                       disabled={!auditPackage}
-                      style={{ width: '100%', padding: '13px', fontSize: '0.88rem', gap: '8px', backgroundColor: 'var(--accent)' }}
+                      style={{ width: '100%', padding: '13px', fontSize: '0.88rem', gap: '8px' }}
                     >
                       <Download size={16} />
                       <span>Download Complete Zeroara Audit Package (.json)</span>
