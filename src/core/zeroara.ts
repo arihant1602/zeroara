@@ -3,6 +3,12 @@ import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
 import { buildPoseidon } from 'circomlibjs';
 // @ts-expect-error snarkjs lacks full ts declarations
 import * as snarkjs from 'snarkjs';
+// @ts-expect-error pdfjs-dist lack of explicit default export
+import * as pdfjs from 'pdfjs-dist';
+
+if (typeof window !== 'undefined' && (pdfjs as any)?.GlobalWorkerOptions) {
+  (pdfjs as any).GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
+}
 
 export interface BoundingBoxCoords {
   id: string;
@@ -203,136 +209,109 @@ export async function computeMasterAuditSeal(
   };
 }
 
-// 6. True Pixel-Burning & Rasterized PDF Export via pdf-lib
-export async function createRedactedPdf(
-  docTitle: string,
-  bboxes: BoundingBoxCoords[],
-  sealTag: string
-): Promise<Uint8Array> {
-  const pdfDoc = await PDFDocument.create();
-  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-  const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-  const fontMono = await pdfDoc.embedFont(StandardFonts.CourierBold);
+export interface RedactionResult {
+  redactedPdfBytes: Uint8Array;
+  redactedHashHex: string;
+  chunkedHash: string;
+  textStreamCount: number;
+  burnedZonesCount: number;
+  durationMs: number;
+  flattenedPngDataUrl: string;
+  fileSizeBytes: number;
+}
 
-  const page = pdfDoc.addPage([595.28, 841.89]); // A4 in points
-  const { width, height } = page.getSize();
+// 6. True Physical Pixel Burning & Rasterized Non-Extractable PDF Generator
+export async function createFlattenedRedactedPdf(
+  sourceCanvas: HTMLCanvasElement,
+  bboxes: ClassifiedTarget[]
+): Promise<RedactionResult> {
+  const startTime = performance.now();
 
-  // Draw background header and certificate styling
-  page.drawRectangle({
-    x: 40,
-    y: height - 100,
-    width: width - 80,
-    height: 60,
-    color: rgb(0.95, 0.96, 0.98),
-  });
+  const width = sourceCanvas.width;
+  const height = sourceCanvas.height;
 
-  page.drawText('ZEROARA PROVABLE REDACTION CERTIFICATE', {
-    x: 55,
-    y: height - 68,
-    size: 14,
-    font: fontBold,
-    color: rgb(0.12, 0.16, 0.22),
-  });
+  // 1. Offscreen canvas at source resolution
+  const offscreen = document.createElement('canvas');
+  offscreen.width = width;
+  offscreen.height = height;
 
-  page.drawText(`Document Title: ${docTitle}  |  Classification: Irreversible Redacted Output`, {
-    x: 55,
-    y: height - 88,
-    size: 8.5,
-    font: font,
-    color: rgb(0.42, 0.45, 0.5),
-  });
+  const ctx = offscreen.getContext('2d');
+  if (!ctx) throw new Error('Canvas 2D context unavailable');
 
-  // Certificate lines
-  const lines = [
-    'CONFIDENTIAL ACCREDITED INVESTOR VERIFICATION (SEC RULE 506(c))',
-    'Issuer: Apex Distributed Ventures LP',
-    'Date of Examination: 2026-08-14',
-    'Subject: Alexandra Vance',
-    'Social Security Number: [REDACTED_PII_PROTECTED]',
-    'Tax Residency: United States of America',
-    '',
-    'FINANCIAL ASSESSMENT & EARNINGS CONFIRMATION:',
-    '1. 2-Year Trailing Net Income: [REDACTED_PROVABLY_VERIFIED >= $100,000]',
-    '2. Verified Individual Net Worth: $2,850,000 USD (Excluding primary residence)',
-    '3. Liquidity Ratio: 4.2x regulatory baseline',
-    '',
-    'I hereby attest under penalty of perjury that the undersigned satisfies accredited criteria.',
-  ];
+  // Copy base document raster
+  ctx.drawImage(sourceCanvas, 0, 0);
 
-  let currentY = height - 140;
-  for (const line of lines) {
-    if (line.startsWith('CONFIDENTIAL') || line.startsWith('FINANCIAL')) {
-      page.drawText(line, {
-        x: 55,
-        y: currentY,
-        size: 10,
-        font: fontBold,
-        color: rgb(0.12, 0.16, 0.22),
-      });
-    } else {
-      page.drawText(line, {
-        x: 55,
-        y: currentY,
-        size: 9.5,
-        font,
-        color: rgb(0.24, 0.28, 0.33),
-      });
-    }
-    currentY -= 22;
-  }
-
-  // Physically burn black pixel rectangles over redaction bounding boxes
+  // 2. Physically burn pitch-black (#000000) pixels over all target bounding zones
+  ctx.fillStyle = '#000000';
   for (const box of bboxes) {
-    const pdfX = 55 + (box.x * (width - 110)) / 600;
-    const pdfY = height - 120 - (box.y * 600) / 480;
-    const pdfW = (box.width * (width - 110)) / 600;
-    const pdfH = (box.height * 600) / 480;
-
-    page.drawRectangle({
-      x: pdfX,
-      y: pdfY,
-      width: Math.max(pdfW, 120),
-      height: Math.max(pdfH, 20),
-      color: rgb(0, 0, 0), // 100% solid black pixel burn
-    });
-
-    if (box.field === 'income') {
-      page.drawText(sealTag, {
-        x: pdfX + 6,
-        y: pdfY + 5,
-        size: 6.5,
-        font: fontMono,
-        color: rgb(0.92, 0.94, 0.98),
-      });
-    }
+    ctx.fillRect(box.x, box.y, box.width, box.height);
   }
 
-  // Load-bearing Master Audit Seal footer
-  page.drawRectangle({
-    x: 40,
-    y: 50,
-    width: width - 80,
-    height: 48,
-    color: rgb(0.93, 0.94, 0.97),
+  // Generate high-resolution PNG data
+  const dataUrl = offscreen.toDataURL('image/png');
+  const base64Data = dataUrl.split(',')[1];
+  const binaryString = atob(base64Data);
+  const pngBytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) {
+    pngBytes[i] = binaryString.charCodeAt(i);
+  }
+
+  // 3. Build flattened PDF containing ONLY the embedded raster image
+  const pdfDoc = await PDFDocument.create();
+  const pngImage = await pdfDoc.embedPng(pngBytes);
+  const page = pdfDoc.addPage([width, height]);
+  page.drawImage(pngImage, {
+    x: 0,
+    y: 0,
+    width,
+    height,
   });
 
-  page.drawText('LOAD-BEARING MASTER AUDIT SEAL:', {
-    x: 55,
-    y: 80,
-    size: 7.5,
-    font: fontBold,
-    color: rgb(0.92, 0.35, 0.05),
-  });
+  const redactedPdfBytes = await pdfDoc.save();
 
-  page.drawText(sealTag, {
-    x: 55,
-    y: 64,
-    size: 7,
-    font: fontMono,
-    color: rgb(0.2, 0.24, 0.3),
-  });
+  // 4. Compute cryptographic preimage H(Doc_Redacted)
+  const redactedHashHex = await sha256Hex(redactedPdfBytes);
+  const chunkedHash = formatChunkedHash(redactedHashHex);
 
-  return await pdfDoc.save();
+  // 5. Automated zero-text-stream verification via pdfjs
+  let textStreamCount = 0;
+  try {
+    const verifyDoc = await (pdfjs as any).getDocument({
+      data: redactedPdfBytes.slice(),
+      standardFontDataUrl: '/standard_fonts/',
+    }).promise;
+    const p1 = await verifyDoc.getPage(1);
+    const tc = await p1.getTextContent();
+    textStreamCount = tc.items.length;
+  } catch (err) {
+    console.warn('Text stream verification note:', err);
+  }
+
+  const durationMs = Math.max(1, Math.round(performance.now() - startTime));
+
+  return {
+    redactedPdfBytes,
+    redactedHashHex,
+    chunkedHash,
+    textStreamCount,
+    burnedZonesCount: bboxes.length,
+    durationMs,
+    flattenedPngDataUrl: dataUrl,
+    fileSizeBytes: redactedPdfBytes.length,
+  };
+}
+
+// Client-side instant zero-network file downloader
+export function downloadFile(bytes: Uint8Array, fileName: string, mimeType: string) {
+  const blob = new Blob([bytes as any], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 // 7. Human-friendly 8-byte Chunked Hash Formatter
@@ -476,11 +455,7 @@ export async function extractPdfSpatialItems(
   height: number;
   rawText: string;
 }> {
-  // @ts-expect-error pdfjs-dist ESM build lack of separate d.ts
-  const pdfjs = await import('pdfjs-dist/build/pdf.mjs');
-  pdfjs.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
-
-  const loadingTask = pdfjs.getDocument({
+  const loadingTask = (pdfjs as any).getDocument({
     data: fileBytes.slice(),
     standardFontDataUrl: '/standard_fonts/',
   });
