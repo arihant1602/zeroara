@@ -484,7 +484,7 @@ export async function generateSamplePdfBytes(): Promise<Uint8Array> {
   return await pdfDoc.save();
 }
 
-// 9. Spatial Token Representation
+// 9. Spatial Token & Extraction Result Types
 export interface ExtractedSpatialToken {
   id: string;
   text: string;
@@ -495,6 +495,9 @@ export interface ExtractedSpatialToken {
   page: number;
   confidence?: number;
 }
+
+export type TargetAction = 'PROVE_AND_BURN' | 'DIRECT_BURN';
+export type TargetSource = 'OCR_AUTO' | 'MANUAL_USER';
 
 export interface ClassifiedTarget {
   id: string;
@@ -508,21 +511,140 @@ export interface ClassifiedTarget {
   width: number;
   height: number;
   page: number;
-  action: 'PROVE_AND_BURN' | 'DIRECT_BURN';
-  source: 'OCR_AUTO' | 'MANUAL_USER';
+  action: TargetAction;
+  source: TargetSource;
+  confidence?: number;
 }
 
-// 10. PDF Spatial Item Extraction via pdfjs-dist
-export async function extractPdfSpatialItems(
-  fileBytes: Uint8Array,
-  canvas: HTMLCanvasElement
-): Promise<{
-  numPages: number;
+export interface DocumentExtractionResult {
   tokens: ExtractedSpatialToken[];
+  targets: ClassifiedTarget[];
+  rawText: string;
+  engineName: string;
+  meanConfidence: number;
+  latencyMs: number;
   width: number;
   height: number;
-  rawText: string;
-}> {
+  numPages: number;
+  usedOcrFallback: boolean;
+}
+
+// Rendering / OCR resolution controls
+const DISPLAY_WIDTH = 900; // canvas + coordinate space presented to the UI
+const OCR_SUPERSAMPLE = 2.0; // spec Stage 2: 2.0x viewport scale for OCR fidelity
+const OCR_MAX_WIDTH = 2200; // hard cap to bound Tesseract Wasm memory
+const TEXT_LAYER_MIN_TOKENS = 5; // below this a PDF is treated as scanned -> OCR
+
+type OcrProgressFn = (percent: number, status: string) => void;
+
+// 10. Tesseract LSTM Worker Core (zero-egress, local Wasm assets)
+interface RawOcrWord {
+  text: string;
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  confidence: number;
+}
+
+// Word extraction that tolerates both the flat `words` array and the
+// block/paragraph/line tree emitted by newer tesseract.js builds.
+function collectTesseractWords(data: any): RawOcrWord[] {
+  const out: RawOcrWord[] = [];
+  const push = (w: any) => {
+    if (!w || !w.bbox) return;
+    const text = (w.text || '').trim();
+    if (!text) return;
+    out.push({
+      text,
+      x0: w.bbox.x0,
+      y0: w.bbox.y0,
+      x1: w.bbox.x1,
+      y1: w.bbox.y1,
+      confidence: typeof w.confidence === 'number' ? w.confidence : 0,
+    });
+  };
+
+  if (Array.isArray(data?.words) && data.words.length > 0) {
+    data.words.forEach(push);
+    return out;
+  }
+
+  for (const block of data?.blocks || []) {
+    for (const para of block?.paragraphs || []) {
+      for (const line of para?.lines || []) {
+        for (const w of line?.words || []) push(w);
+      }
+    }
+  }
+  return out;
+}
+
+async function runTesseract(
+  image: HTMLCanvasElement,
+  onProgress?: OcrProgressFn
+): Promise<{ words: RawOcrWord[]; rawText: string }> {
+  const { createWorker } = await import('tesseract.js');
+  const worker: any = await createWorker('eng', 1, {
+    workerPath: '/tesseract/worker.min.js',
+    corePath: '/tesseract/tesseract-core-simd-lstm.wasm',
+    langPath: '/tesseract',
+    gzip: true,
+    logger: (m: any) => {
+      if (onProgress && typeof m.progress === 'number') {
+        onProgress(Math.round(m.progress * 100), m.status || 'recognizing');
+      }
+    },
+  });
+
+  try {
+    await worker.setParameters({
+      preserve_interword_spaces: '1',
+      user_defined_dpi: '300',
+    });
+  } catch {
+    // parameter tuning is best-effort; recognition proceeds with defaults
+  }
+
+  const ret: any = await worker.recognize(image);
+  await worker.terminate();
+
+  return { words: collectTesseractWords(ret.data), rawText: ret.data?.text || '' };
+}
+
+function mapWordsToTokens(
+  words: RawOcrWord[],
+  factor: number,
+  prefix: string
+): ExtractedSpatialToken[] {
+  return words.map((w, idx) => ({
+    id: `${prefix}_${idx}`,
+    text: w.text,
+    x: Math.round(w.x0 * factor),
+    y: Math.round(w.y0 * factor),
+    width: Math.round((w.x1 - w.x0) * factor),
+    height: Math.round((w.y1 - w.y0) * factor),
+    page: 1,
+    confidence: w.confidence,
+  }));
+}
+
+function meanConfidence(tokens: ExtractedSpatialToken[]): number {
+  const vals = tokens
+    .map((t) => t.confidence)
+    .filter((c): c is number => typeof c === 'number');
+  return vals.length ? vals.reduce((s, c) => s + c, 0) / vals.length : 100;
+}
+
+type ExtractionCore = Omit<DocumentExtractionResult, 'targets' | 'latencyMs' | 'engineName'>;
+
+// PDF: render page 1, use the native vector text layer when present, else OCR.
+async function extractPdfDocument(
+  fileBytes: Uint8Array,
+  canvas: HTMLCanvasElement,
+  onProgress?: OcrProgressFn
+): Promise<ExtractionCore> {
+  // Reuse the module-level pdfjs import (workerSrc is configured at module load).
   const loadingTask = (pdfjs as any).getDocument({
     data: fileBytes.slice(),
     standardFontDataUrl: '/standard_fonts/',
@@ -530,203 +652,421 @@ export async function extractPdfSpatialItems(
   const pdf = await loadingTask.promise;
   const page = await pdf.getPage(1);
 
-  const desiredWidth = 640;
-  const unscaledViewport = page.getViewport({ scale: 1 });
-  const scale = desiredWidth / unscaledViewport.width;
-  const viewport = page.getViewport({ scale });
+  const unscaled = page.getViewport({ scale: 1 });
+  const displayScale = DISPLAY_WIDTH / unscaled.width;
+  const viewport = page.getViewport({ scale: displayScale });
 
-  canvas.width = viewport.width;
-  canvas.height = viewport.height;
-
+  canvas.width = Math.round(viewport.width);
+  canvas.height = Math.round(viewport.height);
   const ctx = canvas.getContext('2d');
   if (ctx) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
     await (page.render({ canvasContext: ctx, viewport } as any) as any).promise;
   }
 
+  // 1) Native vector text layer — exact coordinates for digital PDFs.
   const textContent = await page.getTextContent();
-  const tokens: ExtractedSpatialToken[] = [];
+  const textTokens: ExtractedSpatialToken[] = [];
   const textPieces: string[] = [];
-
   let idx = 0;
   for (const item of textContent.items as any[]) {
     const str = (item.str || '').trim();
     if (!str) continue;
     textPieces.push(str);
-
-    const tx = item.transform[4];
-    const ty = item.transform[5];
-    const [canvasX, canvasY] = viewport.convertToViewportPoint(tx, ty);
-    const itemHeight = Math.max(12, Math.round(Math.abs(item.transform[3]) * scale));
-    const itemWidth = Math.max(10, Math.round(item.width * scale));
-    const boxY = Math.round(canvasY - itemHeight);
-    const boxX = Math.round(canvasX);
-
-    tokens.push({
-      id: `token_${idx++}`,
+    const [cx, cy] = viewport.convertToViewportPoint(item.transform[4], item.transform[5]);
+    const h = Math.max(8, Math.round(Math.abs(item.transform[3]) * displayScale));
+    const w = Math.max(6, Math.round((item.width || 0) * displayScale));
+    textTokens.push({
+      id: `pdf_token_${idx++}`,
       text: str,
-      x: boxX,
-      y: boxY,
-      width: itemWidth,
-      height: itemHeight,
+      x: Math.round(cx),
+      y: Math.round(cy - h),
+      width: w,
+      height: h,
       page: 1,
+      confidence: 100,
     });
   }
 
+  if (textTokens.length >= TEXT_LAYER_MIN_TOKENS) {
+    return {
+      tokens: textTokens,
+      rawText: textPieces.join('\n'),
+      meanConfidence: 100,
+      width: canvas.width,
+      height: canvas.height,
+      numPages: pdf.numPages,
+      usedOcrFallback: false,
+    };
+  }
+
+  // 2) Scanned PDF — rasterize page at supersampled scale and OCR it.
+  const ocrScale = Math.min(displayScale * OCR_SUPERSAMPLE, OCR_MAX_WIDTH / unscaled.width);
+  const ocrViewport = page.getViewport({ scale: ocrScale });
+  const off = document.createElement('canvas');
+  off.width = Math.round(ocrViewport.width);
+  off.height = Math.round(ocrViewport.height);
+  const octx = off.getContext('2d');
+  if (octx) {
+    await (page.render({ canvasContext: octx, viewport: ocrViewport } as any) as any).promise;
+  }
+
+  const { words, rawText } = await runTesseract(off, onProgress);
+  const factor = canvas.width / Math.max(1, off.width);
+  const tokens = mapWordsToTokens(words, factor, 'ocr_token');
+
   return {
+    tokens,
+    rawText,
+    meanConfidence: meanConfidence(tokens),
+    width: canvas.width,
+    height: canvas.height,
     numPages: pdf.numPages,
-    tokens,
-    width: viewport.width,
-    height: viewport.height,
-    rawText: textPieces.join('\n'),
+    usedOcrFallback: true,
   };
 }
 
-// 11. Image Spatial OCR Extraction via Tesseract
-export async function extractImageOcrSpatial(
-  canvas: HTMLCanvasElement,
-  onProgress?: (percent: number, status: string) => void
-): Promise<{
-  tokens: ExtractedSpatialToken[];
-  rawText: string;
-}> {
-  const { createWorker } = await import('tesseract.js');
-  const worker = await createWorker('eng', 1, {
-    workerPath: '/tesseract/worker.min.js',
-    corePath: '/tesseract/tesseract-core-simd-lstm.wasm',
-    langPath: '/tesseract',
-    gzip: true,
-    logger: (m: any) => {
-      if (onProgress && m.progress !== undefined) {
-        onProgress(Math.round(m.progress * 100), m.status);
-      }
-    },
-  });
-
-  const ret = await worker.recognize(canvas);
-  await worker.terminate();
-
-  const words = (ret.data as any).words || [];
-  const tokens: ExtractedSpatialToken[] = words.map((w: any, idx: number) => ({
-    id: `ocr_token_${idx}`,
-    text: w.text,
-    x: w.bbox.x0,
-    y: w.bbox.y0,
-    width: w.bbox.x1 - w.bbox.x0,
-    height: w.bbox.y1 - w.bbox.y0,
-    page: 1,
-    confidence: w.confidence,
-  }));
-
-  return {
-    tokens,
-    rawText: ret.data.text || '',
-  };
-}
-
-// 12. Automated Target Classifier & Real Coordinate Binder
-export function classifyExtractedTargets(
-  tokens: ExtractedSpatialToken[],
-  thresholdValue: number
-): ClassifiedTarget[] {
-  const targets: ClassifiedTarget[] = [];
-
-  // Pattern 1: SSN / Tax ID (3-2-4 digits)
-  const ssnRegex = /\b\d{3}[- ]\d{2}[- ]\d{4}\b/;
-  const ssnToken = tokens.find((t) => ssnRegex.test(t.text));
-  if (ssnToken) {
-    const match = ssnToken.text.match(ssnRegex);
-    targets.push({
-      id: 'field_ssn',
-      label: 'Social Security Number',
-      classification: 'Government Identifier (Sensitive PII)',
-      extractedValue: match ? match[0] : ssnToken.text,
-      x: Math.max(0, ssnToken.x - 4),
-      y: Math.max(0, ssnToken.y - 3),
-      width: ssnToken.width + 8,
-      height: ssnToken.height + 6,
-      page: ssnToken.page,
-      action: 'DIRECT_BURN',
-      source: 'OCR_AUTO',
-    });
-  }
-
-  // Pattern 2: Financial Witness Claim (Currency amounts with USD or $)
-  const incomeToken = tokens.find(
-    (t) =>
-      t.text.includes('145,000') ||
-      /(?:USD|\$)\s*\d{1,3}(?:,\d{3})+/i.test(t.text) ||
-      /\b\d{1,3}(?:,\d{3})+\s*(?:USD)?\b/i.test(t.text)
-  );
-
-  if (incomeToken) {
-    const rawVal = incomeToken.text;
-    const digits = Number(rawVal.replace(/[^0-9]/g, ''));
-    targets.push({
-      id: 'field_income',
-      label: '2-Year Trailing Net Income',
-      classification: 'Financial Witness Claim',
-      extractedValue: rawVal,
-      numericValue: digits,
-      satisfiesThreshold: digits >= thresholdValue,
-      x: Math.max(0, incomeToken.x - 4),
-      y: Math.max(0, incomeToken.y - 3),
-      width: incomeToken.width + 8,
-      height: incomeToken.height + 6,
-      page: incomeToken.page,
-      action: 'PROVE_AND_BURN',
-      source: 'OCR_AUTO',
-    });
-  }
-
-  // If none detected yet, fallback to top financial or sensitive tokens
-  if (targets.length === 0 && tokens.length > 0) {
-    // Select first two distinct tokens with text
-    const valid = tokens.filter((t) => t.text.length >= 4);
-    if (valid[0]) {
-      targets.push({
-        id: 'field_target_1',
-        label: 'Extracted Field 1',
-        classification: 'Sensitive Document Content',
-        extractedValue: valid[0].text,
-        x: Math.max(0, valid[0].x - 4),
-        y: Math.max(0, valid[0].y - 3),
-        width: valid[0].width + 8,
-        height: valid[0].height + 6,
-        page: valid[0].page,
-        action: 'DIRECT_BURN',
-        source: 'OCR_AUTO',
-      });
-    }
-  }
-
-  return targets;
-}
-
-// 13. Image File Canvas Renderer
-export async function renderImageFileToCanvas(
-  file: File,
-  canvas: HTMLCanvasElement
-): Promise<{ width: number; height: number }> {
+// 11. Raster Image OCR Extraction (Tesseract, supersampled from source pixels)
+function loadImageElement(file: File): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     const url = URL.createObjectURL(file);
     img.onload = () => {
-      const targetWidth = 640;
-      const scale = targetWidth / img.naturalWidth;
-      const targetHeight = Math.round(img.naturalHeight * scale);
-
-      canvas.width = targetWidth;
-      canvas.height = targetHeight;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
-      }
       URL.revokeObjectURL(url);
-      resolve({ width: targetWidth, height: targetHeight });
+      resolve(img);
     };
-    img.onerror = reject;
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('Unable to decode image file'));
+    };
     img.src = url;
   });
+}
+
+async function extractImageDocument(
+  file: File,
+  canvas: HTMLCanvasElement,
+  onProgress?: OcrProgressFn
+): Promise<ExtractionCore> {
+  const img = await loadImageElement(file);
+  const naturalW = Math.max(1, img.naturalWidth);
+  const naturalH = Math.max(1, img.naturalHeight);
+
+  // Display render at the shared coordinate-space width.
+  canvas.width = DISPLAY_WIDTH;
+  canvas.height = Math.max(1, Math.round(naturalH * (DISPLAY_WIDTH / naturalW)));
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  }
+
+  // High-resolution OCR render straight from the source pixels.
+  const ocrWidth = Math.min(OCR_MAX_WIDTH, Math.max(naturalW, DISPLAY_WIDTH * OCR_SUPERSAMPLE));
+  const off = document.createElement('canvas');
+  off.width = Math.round(ocrWidth);
+  off.height = Math.max(1, Math.round(naturalH * (ocrWidth / naturalW)));
+  const octx = off.getContext('2d');
+  if (octx) {
+    octx.imageSmoothingEnabled = true;
+    (octx as any).imageSmoothingQuality = 'high';
+    octx.drawImage(img, 0, 0, off.width, off.height);
+  }
+
+  const { words, rawText } = await runTesseract(off, onProgress);
+  const factor = canvas.width / Math.max(1, off.width);
+  const tokens = mapWordsToTokens(words, factor, 'ocr_token');
+
+  return {
+    tokens,
+    rawText,
+    meanConfidence: meanConfidence(tokens),
+    width: canvas.width,
+    height: canvas.height,
+    numPages: 1,
+    usedOcrFallback: true,
+  };
+}
+
+// 12. Spatial Line Reconstruction & Multi-Token Field Classifier
+const RE_SSN = /\b\d{3}[-\s]\d{2}[-\s]\d{4}\b/;
+const RE_EMAIL = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/;
+const RE_PHONE = /\+?\d[\d().\-\s]{8,}\d/;
+const RE_CURRENCY =
+  /(?:USD|US\$|\$|€|£|₹)\s?\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?(?:\s?(?:USD|EUR|GBP|INR))?/;
+const RE_INCOME_LINE = /income|salary|earnings|wage|compensation|revenue|profit/i;
+
+interface LineMatch {
+  text: string;
+  tokens: ExtractedSpatialToken[];
+}
+
+// Cluster tokens into visual lines by vertical center proximity, then order L→R.
+function groupLines(tokens: ExtractedSpatialToken[]): ExtractedSpatialToken[][] {
+  const sorted = [...tokens].sort((a, b) => a.y - b.y || a.x - b.x);
+  const lines: ExtractedSpatialToken[][] = [];
+  for (const t of sorted) {
+    const tc = t.y + t.height / 2;
+    let placed: ExtractedSpatialToken[] | undefined;
+    for (const line of lines) {
+      const rc = line.reduce((s, x) => s + (x.y + x.height / 2), 0) / line.length;
+      const rh = line.reduce((s, x) => s + x.height, 0) / line.length;
+      if (Math.abs(tc - rc) <= Math.max(rh, t.height) * 0.5) {
+        placed = line;
+        break;
+      }
+    }
+    if (placed) placed.push(t);
+    else lines.push([t]);
+  }
+  for (const line of lines) line.sort((a, b) => a.x - b.x);
+  return lines;
+}
+
+// Run a regex over the joined line text and recover the contiguous tokens it spans.
+function matchInLine(line: ExtractedSpatialToken[], re: RegExp): LineMatch[] {
+  let joined = '';
+  const spans: { start: number; end: number; tok: ExtractedSpatialToken }[] = [];
+  line.forEach((tok, i) => {
+    if (i > 0) joined += ' ';
+    const start = joined.length;
+    joined += tok.text;
+    spans.push({ start, end: joined.length, tok });
+  });
+
+  const flags = re.flags.includes('g') ? re.flags : re.flags + 'g';
+  const rx = new RegExp(re.source, flags);
+  const matches: LineMatch[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = rx.exec(joined)) !== null) {
+    const s = m.index;
+    const e = m.index + m[0].length;
+    const toks = spans.filter((sp) => sp.end > s && sp.start < e).map((sp) => sp.tok);
+    if (toks.length) matches.push({ text: m[0].trim(), tokens: toks });
+    if (m.index === rx.lastIndex) rx.lastIndex++;
+  }
+  return matches;
+}
+
+// Union bounding box across tokens, with the spec Stage-3 padding expansion.
+function unionBox(tokens: ExtractedSpatialToken[], pad = 4) {
+  const x0 = Math.min(...tokens.map((t) => t.x));
+  const y0 = Math.min(...tokens.map((t) => t.y));
+  const x1 = Math.max(...tokens.map((t) => t.x + t.width));
+  const y1 = Math.max(...tokens.map((t) => t.y + t.height));
+  return {
+    x: Math.max(0, Math.round(x0 - pad)),
+    y: Math.max(0, Math.round(y0 - pad)),
+    width: Math.round(x1 - x0 + pad * 2),
+    height: Math.round(y1 - y0 + pad * 2),
+  };
+}
+
+function tokenConfidence(tokens: ExtractedSpatialToken[]): number {
+  const vals = tokens
+    .map((t) => t.confidence)
+    .filter((c): c is number => typeof c === 'number');
+  return vals.length
+    ? Math.round((vals.reduce((s, c) => s + c, 0) / vals.length) * 10) / 10
+    : 100;
+}
+
+function parseAmount(text: string): number {
+  const cleaned = text.replace(/[^0-9.]/g, '');
+  const n = Number(cleaned);
+  return isFinite(n) ? n : 0;
+}
+
+export function classifyExtractedTargets(
+  tokens: ExtractedSpatialToken[],
+  thresholdValue: number
+): ClassifiedTarget[] {
+  const lines = groupLines(tokens);
+  const claimed = new Set<string>();
+  const targets: ClassifiedTarget[] = [];
+  let counter = 0;
+
+  interface CurrencyCandidate {
+    tokens: ExtractedSpatialToken[];
+    text: string;
+    value: number;
+    incomeLine: boolean;
+    confidence: number;
+  }
+  const currencies: CurrencyCandidate[] = [];
+
+  const isClaimed = (toks: ExtractedSpatialToken[]) => toks.some((t) => claimed.has(t.id));
+  const claim = (toks: ExtractedSpatialToken[]) => toks.forEach((t) => claimed.add(t.id));
+
+  for (const line of lines) {
+    const lineText = line.map((t) => t.text).join(' ');
+
+    // Government identifiers (SSN / Tax ID).
+    for (const mt of matchInLine(line, RE_SSN)) {
+      if (isClaimed(mt.tokens)) continue;
+      claim(mt.tokens);
+      targets.push({
+        id: `field_ssn_${counter++}`,
+        label: 'Social Security Number',
+        classification: 'Government Identifier (Sensitive PII)',
+        extractedValue: mt.text,
+        ...unionBox(mt.tokens),
+        page: 1,
+        action: 'DIRECT_BURN',
+        source: 'OCR_AUTO',
+        confidence: tokenConfidence(mt.tokens),
+      });
+    }
+
+    // Email addresses.
+    for (const mt of matchInLine(line, RE_EMAIL)) {
+      if (isClaimed(mt.tokens)) continue;
+      claim(mt.tokens);
+      targets.push({
+        id: `field_email_${counter++}`,
+        label: 'Email Address',
+        classification: 'Contact Identifier (PII)',
+        extractedValue: mt.text,
+        ...unionBox(mt.tokens),
+        page: 1,
+        action: 'DIRECT_BURN',
+        source: 'OCR_AUTO',
+        confidence: tokenConfidence(mt.tokens),
+      });
+    }
+
+    // Currency amounts — witness vs. plain figure decided after the full sweep.
+    for (const mt of matchInLine(line, RE_CURRENCY)) {
+      if (isClaimed(mt.tokens)) continue;
+      claim(mt.tokens);
+      currencies.push({
+        tokens: mt.tokens,
+        text: mt.text,
+        value: parseAmount(mt.text),
+        incomeLine: RE_INCOME_LINE.test(lineText),
+        confidence: tokenConfidence(mt.tokens),
+      });
+    }
+
+    // Phone numbers — only after stricter patterns have claimed their tokens.
+    for (const mt of matchInLine(line, RE_PHONE)) {
+      if (isClaimed(mt.tokens)) continue;
+      if (mt.text.replace(/\D/g, '').length < 10) continue;
+      claim(mt.tokens);
+      targets.push({
+        id: `field_phone_${counter++}`,
+        label: 'Phone Number',
+        classification: 'Contact Identifier (PII)',
+        extractedValue: mt.text,
+        ...unionBox(mt.tokens),
+        page: 1,
+        action: 'DIRECT_BURN',
+        source: 'OCR_AUTO',
+        confidence: tokenConfidence(mt.tokens),
+      });
+    }
+  }
+
+  // Select the ZK witness among currency amounts: prefer an income/salary line,
+  // else the first amount above threshold, else the largest amount present.
+  if (currencies.length > 0) {
+    let witnessIdx = currencies.findIndex((c) => c.incomeLine);
+    if (witnessIdx < 0) witnessIdx = currencies.findIndex((c) => c.value >= thresholdValue);
+    if (witnessIdx < 0) {
+      witnessIdx = currencies.reduce(
+        (best, c, i, arr) => (c.value > arr[best].value ? i : best),
+        0
+      );
+    }
+
+    currencies.forEach((c, i) => {
+      const isWitness = i === witnessIdx;
+      targets.push({
+        id: `field_${isWitness ? 'witness' : 'amount'}_${counter++}`,
+        label: isWitness ? '2-Year Trailing Income' : 'Financial Figure',
+        classification: isWitness
+          ? 'Financial Witness Claim (ZK Predicate)'
+          : 'Financial Amount (Sensitive)',
+        extractedValue: c.text,
+        numericValue: c.value,
+        satisfiesThreshold: isWitness ? c.value >= thresholdValue : undefined,
+        ...unionBox(c.tokens),
+        page: 1,
+        action: isWitness ? 'PROVE_AND_BURN' : 'DIRECT_BURN',
+        source: 'OCR_AUTO',
+        confidence: c.confidence,
+      });
+    });
+  }
+
+  // Fallback: nothing auto-classified — surface substantial tokens for manual review.
+  if (targets.length === 0) {
+    tokens
+      .filter((t) => t.text.replace(/\s/g, '').length >= 4)
+      .slice(0, 2)
+      .forEach((t, i) =>
+        targets.push({
+          id: `field_generic_${i}`,
+          label: `Extracted Field ${i + 1}`,
+          classification: 'Sensitive Document Content',
+          extractedValue: t.text,
+          ...unionBox([t]),
+          page: 1,
+          action: 'DIRECT_BURN',
+          source: 'OCR_AUTO',
+          confidence: t.confidence ?? 100,
+        })
+      );
+  }
+
+  // Witness first, then spatial (top-to-bottom) order.
+  targets.sort((a, b) => {
+    if (a.action !== b.action) return a.action === 'PROVE_AND_BURN' ? -1 : 1;
+    return a.y - b.y;
+  });
+  return targets;
+}
+
+// 13. High-Level Document Extraction Orchestrator (Stage 2 entrypoint)
+// Renders the document onto `canvas`, extracts spatial tokens (native text
+// layer for digital PDFs, Tesseract OCR for scanned PDFs and images), then
+// classifies redaction targets — all in one zero-egress local pass.
+export async function extractDocumentSpatial(
+  doc: { mimeType: string; rawBytes?: Uint8Array; fileObj?: File },
+  canvas: HTMLCanvasElement,
+  thresholdValue: number,
+  onProgress?: OcrProgressFn
+): Promise<DocumentExtractionResult> {
+  const start = performance.now();
+
+  let core: ExtractionCore = {
+    tokens: [],
+    rawText: '',
+    meanConfidence: 0,
+    width: canvas.width,
+    height: canvas.height,
+    numPages: 1,
+    usedOcrFallback: false,
+  };
+  let engineName = 'Inert · Unsupported Document Type';
+
+  if (doc.mimeType === 'application/pdf' && doc.rawBytes) {
+    core = await extractPdfDocument(doc.rawBytes, canvas, onProgress);
+    engineName = core.usedOcrFallback
+      ? 'Tesseract LSTM Neural OCR · Scanned PDF (2.0× supersampled)'
+      : 'pdf.js Vector Text Matrix · Native Spatial';
+  } else if (doc.fileObj && doc.mimeType.startsWith('image/')) {
+    core = await extractImageDocument(doc.fileObj, canvas, onProgress);
+    engineName = 'Tesseract LSTM Neural OCR · Raster Image (2.0× supersampled)';
+  }
+
+  const targets = classifyExtractedTargets(core.tokens, thresholdValue);
+  return {
+    ...core,
+    targets,
+    engineName,
+    latencyMs: Math.max(1, Math.round(performance.now() - start)),
+  };
 }
 
 

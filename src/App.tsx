@@ -4,10 +4,8 @@ import {
   sha256Hex,
   formatChunkedHash,
   generateSamplePdfBytes,
-  extractPdfSpatialItems,
-  extractImageOcrSpatial,
+  extractDocumentSpatial,
   classifyExtractedTargets,
-  renderImageFileToCanvas,
   createFlattenedRedactedPdf,
   downloadFile,
   generateIncomeThresholdProof,
@@ -149,21 +147,16 @@ export function App() {
 
     const runExtraction = async () => {
       setOcrRunning(true);
-      const start = performance.now();
 
       try {
-        let tokens: ExtractedSpatialToken[] = [];
-        let engine = 'PDF Native Spatial Text Matrix';
-
-        if (doc.mimeType === 'application/pdf') {
-          const res = await extractPdfSpatialItems(doc.rawBytes!, canvas);
-          tokens = res.tokens;
-        } else if (doc.fileObj && doc.mimeType.startsWith('image/')) {
-          engine = 'In-Browser Neural OCR (Tesseract Wasm)';
-          await renderImageFileToCanvas(doc.fileObj, canvas);
-          const res = await extractImageOcrSpatial(canvas);
-          tokens = res.tokens;
-        }
+        // Unified Stage 2 engine: pdf.js text layer, with Tesseract LSTM
+        // fallback for scanned PDFs and images (2.0x supersampled), plus
+        // line reconstruction + multi-token field classification.
+        const result = await extractDocumentSpatial(
+          doc,
+          canvas,
+          enterpriseSpec.thresholdValue
+        );
 
         if (isCancelled) return;
 
@@ -173,25 +166,22 @@ export function App() {
           cleanCanvasDataRef.current = ctx.getImageData(0, 0, canvas.width, canvas.height);
         }
 
-        const classified = classifyExtractedTargets(tokens, enterpriseSpec.thresholdValue);
-        const elapsed = Math.max(1, Math.round(performance.now() - start));
-
-        setExtractedTokens(tokens);
-        setDetectedFields(classified);
-        if (classified.length > 0) {
-          setSelectedFieldId(classified[0].id);
+        setExtractedTokens(result.tokens);
+        setDetectedFields(result.targets);
+        if (result.targets.length > 0) {
+          setSelectedFieldId(result.targets[0].id);
         }
 
         setOcrTelemetry({
-          latencyMs: elapsed,
-          tokenCount: tokens.length,
-          engineName: engine,
-          targetsFound: classified.length,
+          latencyMs: result.latencyMs,
+          tokenCount: result.tokens.length,
+          engineName: result.engineName,
+          targetsFound: result.targets.length,
         });
 
         // Overlay bounding boxes if in Phase 2
         if (activePhase === 2 && showHudOverlays) {
-          drawBoundingBoxOverlays(canvas, classified, classified[0]?.id || null);
+          drawBoundingBoxOverlays(canvas, result.targets, result.targets[0]?.id || null);
         }
       } catch (err) {
         console.error('Document spatial processing error:', err);
