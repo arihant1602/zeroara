@@ -5,6 +5,13 @@ import {
   DocumentExtractionResult,
   OcrProgressFn,
 } from './types';
+import { preprocessForOcr } from './preprocess';
+import {
+  getScenario,
+  DEFAULT_SCENARIO_ID,
+  RE_CURRENCY as SCENARIO_CURRENCY,
+  type DocumentScenario,
+} from '../../core/scenarios';
 
 if (typeof window !== 'undefined' && (pdfjs as any)?.GlobalWorkerOptions) {
   (pdfjs as any).GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
@@ -114,6 +121,18 @@ function meanConfidence(tokens: ExtractedSpatialToken[]): number {
 
 type ExtractionCore = Omit<DocumentExtractionResult, 'targets' | 'latencyMs' | 'engineName'>;
 
+// Paint a (possibly deskewed/warped) cleaned raster into the visible canvas so
+// OCR boxes, HUD overlays, and the pixel-burn all share one coordinate space.
+function drawCleanedToDisplay(canvas: HTMLCanvasElement, src: HTMLCanvasElement) {
+  canvas.width = DISPLAY_WIDTH;
+  canvas.height = Math.max(1, Math.round((src.height / Math.max(1, src.width)) * DISPLAY_WIDTH));
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(src, 0, 0, canvas.width, canvas.height);
+  }
+}
+
 async function extractPdfDocument(
   fileBytes: Uint8Array,
   canvas: HTMLCanvasElement,
@@ -174,7 +193,7 @@ async function extractPdfDocument(
     };
   }
 
-  // 2) Scanned PDF fallback
+  // 2) Scanned PDF fallback: supersample -> OpenCV cleanup -> OCR the cleaned raster
   const ocrScale = Math.min(displayScale * OCR_SUPERSAMPLE, OCR_MAX_WIDTH / unscaled.width);
   const ocrViewport = page.getViewport({ scale: ocrScale });
   const off = document.createElement('canvas');
@@ -185,8 +204,13 @@ async function extractPdfDocument(
     await (page.render({ canvasContext: octx, viewport: ocrViewport } as any) as any).promise;
   }
 
-  const { words, rawText } = await runTesseract(off, onProgress);
-  const factor = canvas.width / Math.max(1, off.width);
+  const cleaned = await preprocessForOcr(off, (p, s) => onProgress?.(Math.round(p * 0.4), s));
+  drawCleanedToDisplay(canvas, cleaned);
+
+  const { words, rawText } = await runTesseract(cleaned, (p, s) =>
+    onProgress?.(40 + Math.round(p * 0.6), s)
+  );
+  const factor = canvas.width / Math.max(1, cleaned.width);
   const tokens = mapWordsToTokens(words, factor, 'ocr_token');
 
   return {
@@ -225,14 +249,7 @@ async function extractImageDocument(
   const naturalW = Math.max(1, img.naturalWidth);
   const naturalH = Math.max(1, img.naturalHeight);
 
-  canvas.width = DISPLAY_WIDTH;
-  canvas.height = Math.max(1, Math.round(naturalH * (DISPLAY_WIDTH / naturalW)));
-  const ctx = canvas.getContext('2d');
-  if (ctx) {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-  }
-
+  // High-resolution OCR source rendered straight from the source pixels.
   const ocrWidth = Math.min(OCR_MAX_WIDTH, Math.max(naturalW, DISPLAY_WIDTH * OCR_SUPERSAMPLE));
   const off = document.createElement('canvas');
   off.width = Math.round(ocrWidth);
@@ -244,8 +261,14 @@ async function extractImageDocument(
     octx.drawImage(img, 0, 0, off.width, off.height);
   }
 
-  const { words, rawText } = await runTesseract(off, onProgress);
-  const factor = canvas.width / Math.max(1, off.width);
+  // OpenCV cleanup (illumination/perspective/deskew/binarize) becomes the visible canvas.
+  const cleaned = await preprocessForOcr(off, (p, s) => onProgress?.(Math.round(p * 0.4), s));
+  drawCleanedToDisplay(canvas, cleaned);
+
+  const { words, rawText } = await runTesseract(cleaned, (p, s) =>
+    onProgress?.(40 + Math.round(p * 0.6), s)
+  );
+  const factor = canvas.width / Math.max(1, cleaned.width);
   const tokens = mapWordsToTokens(words, factor, 'ocr_token');
 
   return {
@@ -487,11 +510,192 @@ export function classifyExtractedTargets(
   return targets;
 }
 
+// --- Scenario-aware classification -----------------------------------------
+
+// Label-anchored value: find a label keyword on a line and take the trailing
+// tokens to its right as the field value (e.g. "Name: Rahul Kumar").
+function matchLabelValue(line: ExtractedSpatialToken[], labelRe: RegExp): LineMatch | null {
+  let joined = '';
+  const spans: { start: number; end: number; tok: ExtractedSpatialToken }[] = [];
+  line.forEach((tok, i) => {
+    if (i > 0) joined += ' ';
+    const start = joined.length;
+    joined += tok.text;
+    spans.push({ start, end: joined.length, tok });
+  });
+  const re = new RegExp(labelRe.source, labelRe.flags.replace('g', ''));
+  const m = re.exec(joined);
+  if (!m) return null;
+  const valueStart = m.index + m[0].length;
+  const valueToks = spans
+    .filter((sp) => sp.start >= valueStart)
+    .map((sp) => sp.tok)
+    .filter((t) => t.text.replace(/[:\-–—.\s]/g, '').length > 0);
+  if (!valueToks.length) return null;
+  const text = valueToks.map((t) => t.text).join(' ').replace(/^[:\-–—\s.]+/, '').trim();
+  if (!text) return null;
+  return { text, tokens: valueToks };
+}
+
+// Detect and classify redaction targets for a specific document scenario.
+export function classifyForScenario(
+  tokens: ExtractedSpatialToken[],
+  scenario: DocumentScenario,
+  opts: { thresholdValue: number }
+): ClassifiedTarget[] {
+  const lines = groupLines(tokens);
+  const claimed = new Set<string>();
+  const targets: ClassifiedTarget[] = [];
+  let counter = 0;
+
+  const isClaimed = (toks: ExtractedSpatialToken[]) => toks.some((t) => claimed.has(t.id));
+  const claim = (toks: ExtractedSpatialToken[]) => toks.forEach((t) => claimed.add(t.id));
+
+  const fields = [...scenario.fields].sort((a, b) => a.priority - b.priority);
+  const currencyFields = fields.filter((f) => f.detect.kind === 'currency');
+  const otherFields = fields.filter((f) => f.detect.kind !== 'currency');
+
+  // Pattern + label-anchored fields (identifiers, names, dates, addresses...).
+  for (const field of otherFields) {
+    for (const line of lines) {
+      if (field.detect.kind === 'pattern') {
+        for (const mt of matchInLine(line, field.detect.re)) {
+          if (isClaimed(mt.tokens)) continue;
+          claim(mt.tokens);
+          targets.push({
+            id: `field_${field.key}_${counter++}`,
+            label: field.label,
+            classification: field.classification,
+            extractedValue: mt.text,
+            numericValue: field.numeric ? parseAmount(mt.text) : undefined,
+            ...unionBox(mt.tokens),
+            page: 1,
+            action: field.action,
+            source: 'OCR_AUTO',
+            confidence: tokenConfidence(mt.tokens),
+            fieldKey: field.key,
+          });
+        }
+      } else if (field.detect.kind === 'label') {
+        const mv = matchLabelValue(line, field.detect.re);
+        if (mv && !isClaimed(mv.tokens)) {
+          claim(mv.tokens);
+          targets.push({
+            id: `field_${field.key}_${counter++}`,
+            label: field.label,
+            classification: field.classification,
+            extractedValue: mv.text,
+            ...unionBox(mv.tokens),
+            page: 1,
+            action: field.action,
+            source: 'OCR_AUTO',
+            confidence: tokenConfidence(mv.tokens),
+            fieldKey: field.key,
+          });
+        }
+      }
+    }
+  }
+
+  // Currency / numeric witness selection.
+  if (currencyFields.length > 0) {
+    const witnessField = currencyFields.find((f) => f.isWitness);
+    const cands: {
+      tokens: ExtractedSpatialToken[];
+      text: string;
+      value: number;
+      incomeLine: boolean;
+      confidence: number;
+    }[] = [];
+    for (const line of lines) {
+      const lineText = line.map((t) => t.text).join(' ');
+      for (const mt of matchInLine(line, SCENARIO_CURRENCY)) {
+        if (isClaimed(mt.tokens)) continue;
+        claim(mt.tokens);
+        cands.push({
+          tokens: mt.tokens,
+          text: mt.text,
+          value: parseAmount(mt.text),
+          incomeLine: RE_INCOME_LINE.test(lineText),
+          confidence: tokenConfidence(mt.tokens),
+        });
+      }
+    }
+    let witnessIdx = -1;
+    if (witnessField && cands.length > 0) {
+      witnessIdx = cands.findIndex((c) => c.incomeLine);
+      if (witnessIdx < 0) witnessIdx = cands.findIndex((c) => c.value >= opts.thresholdValue);
+      if (witnessIdx < 0) {
+        witnessIdx = cands.reduce((best, c, i, arr) => (c.value > arr[best].value ? i : best), 0);
+      }
+    }
+    cands.forEach((c, i) => {
+      const isW = !!witnessField && i === witnessIdx;
+      if (isW && witnessField) {
+        targets.push({
+          id: `field_${witnessField.key}_${counter++}`,
+          label: witnessField.label,
+          classification: witnessField.classification,
+          extractedValue: c.text,
+          numericValue: c.value,
+          satisfiesThreshold: c.value >= opts.thresholdValue,
+          ...unionBox(c.tokens),
+          page: 1,
+          action: 'PROVE_AND_BURN',
+          source: 'OCR_AUTO',
+          confidence: c.confidence,
+          fieldKey: witnessField.key,
+        });
+      } else {
+        targets.push({
+          id: `field_amount_${counter++}`,
+          label: 'Financial Figure',
+          classification: 'Financial Amount (Sensitive)',
+          extractedValue: c.text,
+          numericValue: c.value,
+          ...unionBox(c.tokens),
+          page: 1,
+          action: 'DIRECT_BURN',
+          source: 'OCR_AUTO',
+          confidence: c.confidence,
+          fieldKey: 'amount',
+        });
+      }
+    });
+  }
+
+  // Fallback: surface substantial tokens so uploads always yield candidates.
+  if (targets.length === 0) {
+    tokens
+      .filter((t) => t.text.replace(/\s/g, '').length >= 4)
+      .slice(0, 2)
+      .forEach((t, i) =>
+        targets.push({
+          id: `field_generic_${i}`,
+          label: `Extracted Field ${i + 1}`,
+          classification: 'Sensitive Document Content',
+          extractedValue: t.text,
+          ...unionBox([t]),
+          page: 1,
+          action: 'DIRECT_BURN',
+          source: 'OCR_AUTO',
+          confidence: t.confidence ?? 100,
+        })
+      );
+  }
+
+  const rank = (a: ClassifiedTarget['action']) =>
+    a === 'PROVE_AND_BURN' ? 0 : a === 'DIRECT_BURN' ? 1 : 2;
+  targets.sort((a, b) => rank(a.action) - rank(b.action) || a.y - b.y);
+  return targets;
+}
+
 export async function extractDocumentSpatial(
   doc: { mimeType: string; rawBytes?: Uint8Array; fileObj?: File },
   canvas: HTMLCanvasElement,
   thresholdValue: number,
-  onProgress?: OcrProgressFn
+  onProgress?: OcrProgressFn,
+  scenarioId?: string
 ): Promise<DocumentExtractionResult> {
   const start = performance.now();
 
@@ -509,14 +713,15 @@ export async function extractDocumentSpatial(
   if (doc.mimeType === 'application/pdf' && doc.rawBytes) {
     core = await extractPdfDocument(doc.rawBytes, canvas, onProgress);
     engineName = core.usedOcrFallback
-      ? 'Tesseract LSTM Neural OCR · Scanned PDF (2.0× supersampled)'
+      ? 'Tesseract LSTM Neural OCR · Scanned PDF (2.0× supersampled, OpenCV cleaned)'
       : 'pdf.js Vector Text Matrix · Native Spatial';
   } else if (doc.fileObj && doc.mimeType.startsWith('image/')) {
     core = await extractImageDocument(doc.fileObj, canvas, onProgress);
-    engineName = 'Tesseract LSTM Neural OCR · Raster Image (2.0× supersampled)';
+    engineName = 'Tesseract LSTM Neural OCR · Raster Image (2.0× supersampled, OpenCV cleaned)';
   }
 
-  const targets = classifyExtractedTargets(core.tokens, thresholdValue);
+  const scenario = getScenario(scenarioId ?? DEFAULT_SCENARIO_ID);
+  const targets = classifyForScenario(core.tokens, scenario, { thresholdValue });
   return {
     ...core,
     targets,

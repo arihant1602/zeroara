@@ -51,8 +51,10 @@ export const VerifierPortalView: React.FC<VerifierPortalViewProps> = ({
     try {
       const text = await file.text();
       const parsed: ZeroaraAuditPackage = JSON.parse(text);
-      if (!parsed.masterAuditSeal || !parsed.zeroKnowledgeProof) {
-        alert('Invalid Zeroara Audit Package: Missing cryptographic seals.');
+      // Proof-backed packages carry a ZK proof; seal-only packages (identity docs)
+      // are valid with just the master audit seal + sanitized document.
+      if (!parsed.masterAuditSeal || !parsed.sanitizedDocument) {
+        alert('Invalid Zeroara Audit Package: Missing master audit seal.');
         return;
       }
       setActivePkg(parsed);

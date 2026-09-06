@@ -5,7 +5,7 @@ import {
   formatChunkedHash,
   generateSamplePdfBytes,
   extractDocumentSpatial,
-  classifyExtractedTargets,
+  classifyForScenario,
   createFlattenedRedactedPdf,
   downloadFile,
   generateIncomeThresholdProof,
@@ -52,6 +52,7 @@ import {
   HardwareEnclaveView,
   TransportProtocolView,
 } from './layers';
+import { SCENARIOS, getScenario, isProofBacked } from './core/scenarios';
 
 export interface IngestedDoc {
   fileName: string;
@@ -66,13 +67,15 @@ export interface IngestedDoc {
 }
 
 export interface EnterpriseSpec {
+  documentCategory: string; // scenario id (e.g. 'aadhaar', 'salary_slip')
   requesterName: string;
   purpose: string;
   targetField: string;
   predicate: string;
   thresholdValue: number;
-  currency: string;
+  currency: string; // currency / unit; '' for non-numeric scenarios
   challengeNonce: string;
+  requiredRedactionFields: string[];
 }
 
 export interface OcrTelemetrySummary {
@@ -176,22 +179,48 @@ export function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const cleanCanvasDataRef = useRef<ImageData | null>(null);
 
-  // Enterprise Verification Spec State
+  // Document scenario + enterprise/verifier spec state
+  const INITIAL_SCENARIO = getScenario('income_accredited');
   const [enterpriseSpec, setEnterpriseSpec] = useState<EnterpriseSpec>({
-    requesterName: 'Apex Distributed Ventures LP',
-    purpose: 'SEC Rule 506(c) Accredited Investor Verification',
-    targetField: '2-Year Trailing Net Income',
-    predicate: '>= (Greater than or equal to)',
-    thresholdValue: 100000,
-    currency: 'USD',
+    documentCategory: INITIAL_SCENARIO.id,
+    requesterName: INITIAL_SCENARIO.defaults.requesterName,
+    purpose: INITIAL_SCENARIO.defaults.purpose,
+    targetField: INITIAL_SCENARIO.fields.find((f) => f.isWitness)?.label ?? INITIAL_SCENARIO.fields[0].label,
+    predicate: INITIAL_SCENARIO.defaults.predicate,
+    thresholdValue: INITIAL_SCENARIO.defaults.thresholdValue,
+    currency: INITIAL_SCENARIO.defaults.unit,
     challengeNonce: '0x94f8a2bc710e39b4d1c68f12a03',
+    requiredRedactionFields: INITIAL_SCENARIO.fields.map((f) => f.label),
   });
 
-  const presets = [
-    { label: 'SEC 506(c) ($100k)', req: 'Apex Distributed Ventures LP', field: '2-Year Trailing Net Income', amount: 100000 },
-    { label: 'Senior Salary ($150k)', req: 'Orbital Cybernetics Corp', field: 'Base Annual Salary', amount: 150000 },
-    { label: 'Mortgage Solvency ($80k)', req: 'First Horizon Underwriting', field: 'Qualifying Annual Income', amount: 80000 },
-  ];
+  // Derived: the active scenario and whether it can drive a numeric ZK predicate.
+  const scenario = getScenario(enterpriseSpec.documentCategory);
+  const scenarioProofBacked = isProofBacked(scenario);
+
+  // Switch the active document scenario: reset the verifier spec to the
+  // scenario's defaults and re-rank OCR targets for the new field set.
+  const applyScenario = (scenarioId: string) => {
+    const next = getScenario(scenarioId);
+    setEnterpriseSpec((prev) => ({
+      ...prev,
+      documentCategory: next.id,
+      requesterName: next.defaults.requesterName,
+      purpose: next.defaults.purpose,
+      targetField: next.fields.find((f) => f.isWitness)?.label ?? next.fields[0].label,
+      predicate: next.defaults.predicate,
+      thresholdValue: next.defaults.thresholdValue,
+      currency: next.defaults.unit,
+      requiredRedactionFields: next.fields.map((f) => f.label),
+    }));
+    if (extractedTokens.length > 0) {
+      const targets = classifyForScenario(extractedTokens, next, {
+        thresholdValue: next.defaults.thresholdValue,
+      });
+      setDetectedFields(targets);
+      setSelectedFieldId(targets[0]?.id ?? null);
+    }
+    invalidateDownstreamState('Scenario changed — re-run redaction, proof, and seal.');
+  };
 
   // Core Document Extraction Pipeline running on mounted canvas
   useEffect(() => {
@@ -210,7 +239,9 @@ export function App() {
         const result = await extractDocumentSpatial(
           doc,
           canvas,
-          enterpriseSpec.thresholdValue
+          enterpriseSpec.thresholdValue,
+          undefined,
+          enterpriseSpec.documentCategory
         );
 
         if (isCancelled) return;
@@ -315,16 +346,30 @@ export function App() {
     setProverError(null);
     setInvalidationMessage(null);
 
-    const witness =
-      detectedFields.find((f) => f.action === 'PROVE_AND_BURN') ||
-      detectedFields.find((f) => typeof f.numericValue === 'number') ||
-      detectedFields[0];
-    const actualVal = witness?.numericValue || 145000;
+    const witness = detectedFields.find(
+      (f) => f.action === 'PROVE_AND_BURN' && typeof f.numericValue === 'number'
+    );
+
+    // Seal-only scenarios (identity docs) or documents with no numeric witness
+    // do NOT receive a fabricated proof. Redaction is bound into the master
+    // seal only; the ZK stage is skipped honestly.
+    if (!scenarioProofBacked || !witness) {
+      setProofResult(null);
+      setProofVerified(null);
+      setProofVerifyLatencyMs(null);
+      setInvalidationMessage(
+        scenarioProofBacked
+          ? 'No numeric witness detected — proceeding seal-only (no ZK predicate proof generated).'
+          : `${scenario.label} is a seal-only document category — redaction is sealed without a numeric predicate proof.`
+      );
+      setStage(4);
+      return;
+    }
 
     setIsProving(true);
     try {
       const sessionCtx: SessionContext = {
-        documentDigest: doc?.hashHex || '0x0000000000000000000000000000000000000000000000000000000000000000',
+        documentDigest: doc?.hashHex || '0x' + '0'.repeat(64),
         requesterName: enterpriseSpec.requesterName,
         purpose: enterpriseSpec.purpose,
         thresholdValue: enterpriseSpec.thresholdValue,
@@ -332,7 +377,7 @@ export function App() {
       };
 
       const res = await generateIncomeThresholdProof(
-        actualVal,
+        witness.numericValue as number,
         enterpriseSpec.thresholdValue,
         sessionCtx
       );
@@ -367,22 +412,30 @@ export function App() {
 
   // Execute Phase 5: Generate Quad-Factor Master Audit Seal & Self-Contained Package
   const executeMasterSeal = async () => {
-    if (!redactionResult || !proofResult || !doc) return;
+    if (!redactionResult || !doc) return;
 
     setIsSealing(true);
     try {
+      // DETECT_ONLY fields are flagged but not burned, so they are not bound
+      // into the geometry of the seal.
+      const burnedTargets = detectedFields.filter((f) => f.action !== 'DETECT_ONLY');
+
       const seal = await computeMasterAuditSeal(
         redactionResult.redactedHashHex,
-        detectedFields,
-        proofResult.commitment,
-        proofResult.proof
+        burnedTargets,
+        proofResult?.commitment ?? '',
+        proofResult?.proof ?? null
       );
       setMasterSeal(seal);
+
+      const redactionMode: 'PROOF_BACKED' | 'SEAL_ONLY' = proofResult ? 'PROOF_BACKED' : 'SEAL_ONLY';
 
       const pkg: ZeroaraAuditPackage = {
         protocol: 'Zeroara Provable Redaction Protocol',
         version: '1.0.0',
         generatedAt: new Date().toISOString(),
+        scenario: { id: scenario.id, label: scenario.label, category: scenario.category },
+        redactionMode,
         sourceDocument: {
           fileName: doc.fileName,
           fileSizeBytes: doc.fileSizeBytes,
@@ -392,7 +445,7 @@ export function App() {
         sanitizedDocument: {
           fileSizeBytes: redactionResult.fileSizeBytes,
           preimageSha256: redactionResult.redactedHashHex,
-          burnedBoundingBoxes: detectedFields.map((f) => ({
+          burnedBoundingBoxes: burnedTargets.map((f) => ({
             id: f.id,
             label: f.label,
             x: f.x,
@@ -403,26 +456,38 @@ export function App() {
           })),
           textStreamsDetected: redactionResult.textStreamCount,
         },
+        redactedFields: detectedFields.map((f) => ({
+          label: f.label,
+          classification: f.classification,
+          action: f.action,
+          fieldKey: f.fieldKey,
+        })),
         enterpriseRequirement: {
           requesterName: enterpriseSpec.requesterName,
           purpose: enterpriseSpec.purpose,
+          documentCategory: scenario.label,
           targetField: enterpriseSpec.targetField,
           predicate: enterpriseSpec.predicate,
           thresholdValue: enterpriseSpec.thresholdValue,
           currency: enterpriseSpec.currency,
           challengeNonce: enterpriseSpec.challengeNonce,
+          requiredRedactionFields: enterpriseSpec.requiredRedactionFields,
         },
-        zeroKnowledgeProof: {
-          curve: proofResult.proof.curve,
-          protocol: proofResult.proof.protocol,
-          publicSignals: proofResult.publicSignals,
-          proof: proofResult.proof,
-          poseidonCommitment: proofResult.commitment,
-          blindingSalt: proofResult.blindingSalt,
-          sessionBinding: proofResult.sessionBinding,
-          verified: proofVerified ?? true,
-          verificationLatencyMs: proofVerifyLatencyMs ?? 25,
-        },
+        ...(proofResult
+          ? {
+              zeroKnowledgeProof: {
+                curve: proofResult.proof.curve,
+                protocol: proofResult.proof.protocol,
+                publicSignals: proofResult.publicSignals,
+                proof: proofResult.proof,
+                poseidonCommitment: proofResult.commitment,
+                blindingSalt: proofResult.blindingSalt,
+                sessionBinding: proofResult.sessionBinding,
+                verified: proofVerified ?? true,
+                verificationLatencyMs: proofVerifyLatencyMs ?? 25,
+              },
+            }
+          : {}),
         masterAuditSeal: seal,
       };
 
@@ -1027,31 +1092,40 @@ export function App() {
                       <span className="neu-claim-badge">SIMULATED AUDITOR</span>
                     </div>
 
-                    {/* Preset Chips */}
-                    <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                      {presets.map((p) => (
-                        <button
-                          key={p.label}
-                          type="button"
-                          className="neu-pill-btn"
-                          style={{
-                            fontSize: '0.72rem',
-                            padding: '4px 10px',
-                            color: enterpriseSpec.thresholdValue === p.amount ? 'var(--accent)' : 'var(--fg-muted)',
-                            boxShadow: enterpriseSpec.thresholdValue === p.amount ? 'var(--shadow-inset-sm)' : 'var(--shadow-extruded-sm)',
-                            fontWeight: enterpriseSpec.thresholdValue === p.amount ? 700 : 500,
-                          }}
-                          onClick={() => {
-                            setEnterpriseSpec((prev) => ({ ...prev, requesterName: p.req, targetField: p.field, thresholdValue: p.amount }));
-                            invalidateDownstreamState('Enterprise requirement preset changed — previous ZK proof invalidated. Please generate a new proof.');
-                            if (extractedTokens.length > 0) {
-                              setDetectedFields(classifyExtractedTargets(extractedTokens, p.amount));
-                            }
-                          }}
-                        >
-                          {p.label}
-                        </button>
-                      ))}
+                    {/* Document Category / Scenario Selector */}
+                    <div>
+                      <label style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--fg-muted)', display: 'block', marginBottom: '4px' }}>
+                        Document Category
+                      </label>
+                      <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                        {SCENARIOS.map((s) => (
+                          <button
+                            key={s.id}
+                            type="button"
+                            className="neu-pill-btn"
+                            style={{
+                              fontSize: '0.72rem',
+                              padding: '4px 10px',
+                              color: enterpriseSpec.documentCategory === s.id ? 'var(--accent)' : 'var(--fg-muted)',
+                              boxShadow: enterpriseSpec.documentCategory === s.id ? 'var(--shadow-inset-sm)' : 'var(--shadow-extruded-sm)',
+                              fontWeight: enterpriseSpec.documentCategory === s.id ? 700 : 500,
+                            }}
+                            onClick={() => applyScenario(s.id)}
+                          >
+                            {s.label}
+                          </button>
+                        ))}
+                      </div>
+                      <p style={{ fontSize: '0.72rem', color: 'var(--fg-muted)', marginTop: '8px', lineHeight: 1.5 }}>
+                        {scenario.description}
+                      </p>
+                      <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap', marginTop: '6px' }}>
+                        {scenario.fields.map((f) => (
+                          <span key={f.key} className="neu-claim-badge" style={{ fontSize: '0.66rem' }}>
+                            {f.label} · {f.action === 'PROVE_AND_BURN' ? 'prove+burn' : f.action === 'DETECT_ONLY' ? 'detect' : 'burn'}
+                          </span>
+                        ))}
+                      </div>
                     </div>
 
                     <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: '10px' }}>
@@ -1073,24 +1147,32 @@ export function App() {
 
                       <div>
                         <label style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--fg-muted)', display: 'block', marginBottom: '4px' }}>
-                          Required Threshold ($ USD)
+                          {scenarioProofBacked ? `Required Threshold (${enterpriseSpec.currency || 'value'})` : 'Predicate'}
                         </label>
-                        <input
-                          type="number"
-                          step="5000"
-                          min="1000"
-                          className="neu-input"
-                          style={{ padding: '10px 14px', fontSize: '0.8rem', fontWeight: 700 }}
-                          value={enterpriseSpec.thresholdValue}
-                          onChange={(e) => {
-                            const val = Number(e.target.value);
-                            setEnterpriseSpec({ ...enterpriseSpec, thresholdValue: val });
-                            invalidateDownstreamState('Enterprise threshold modified — previous ZK proof invalidated.');
-                            if (extractedTokens.length > 0) {
-                              setDetectedFields(classifyExtractedTargets(extractedTokens, val));
-                            }
-                          }}
-                        />
+                        {scenarioProofBacked ? (
+                          <input
+                            type="number"
+                            step="5000"
+                            min="0"
+                            className="neu-input"
+                            style={{ padding: '10px 14px', fontSize: '0.8rem', fontWeight: 700 }}
+                            value={enterpriseSpec.thresholdValue}
+                            onChange={(e) => {
+                              const val = Number(e.target.value);
+                              setEnterpriseSpec({ ...enterpriseSpec, thresholdValue: val });
+                              invalidateDownstreamState('Enterprise threshold modified — previous ZK proof invalidated.');
+                              if (extractedTokens.length > 0) {
+                                setDetectedFields(
+                                  classifyForScenario(extractedTokens, scenario, { thresholdValue: val })
+                                );
+                              }
+                            }}
+                          />
+                        ) : (
+                          <div className="neu-input" style={{ padding: '10px 14px', fontSize: '0.78rem', color: 'var(--fg-muted)' }}>
+                            Seal-only · no numeric predicate
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -1206,7 +1288,7 @@ export function App() {
                               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                 <span style={{ fontSize: '0.8rem', color: 'var(--fg-muted)' }}>Enterprise Threshold:</span>
                                 <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8rem', fontWeight: 700 }}>
-                                  &gt;= ${enterpriseSpec.thresholdValue.toLocaleString()} USD
+                                  &gt;= {enterpriseSpec.thresholdValue.toLocaleString()} {enterpriseSpec.currency}
                                 </span>
                               </div>
 
@@ -1214,8 +1296,8 @@ export function App() {
                                 <span style={{ fontSize: '0.8rem', color: 'var(--fg-muted)' }}>Condition Satisfied:</span>
                                 <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8rem', fontWeight: 800, color: (field.numericValue || 0) >= enterpriseSpec.thresholdValue ? 'var(--accent-secondary)' : 'var(--fg-muted)' }}>
                                   {(field.numericValue || 0) >= enterpriseSpec.thresholdValue
-                                    ? `TRUE ($${((field.numericValue || 0) / 1000).toFixed(0)}k >= $${(enterpriseSpec.thresholdValue / 1000).toFixed(0)}k)`
-                                    : `FALSE ($${((field.numericValue || 0) / 1000).toFixed(0)}k < $${(enterpriseSpec.thresholdValue / 1000).toFixed(0)}k)`}
+                                    ? `TRUE (${(field.numericValue || 0).toLocaleString()} >= ${enterpriseSpec.thresholdValue.toLocaleString()})`
+                                    : `FALSE (${(field.numericValue || 0).toLocaleString()} < ${enterpriseSpec.thresholdValue.toLocaleString()})`}
                                 </span>
                               </div>
                             </>
@@ -1456,14 +1538,18 @@ export function App() {
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <span style={{ color: 'var(--fg-muted)' }}>Enterprise Threshold:</span>
                         <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--fg-primary)' }}>
-                          &ge; ${enterpriseSpec.thresholdValue.toLocaleString()} {enterpriseSpec.currency}
+                          &ge; {enterpriseSpec.thresholdValue.toLocaleString()} {enterpriseSpec.currency}
                         </span>
                       </div>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <span style={{ color: 'var(--fg-muted)' }}>Private Secret in RAM:</span>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                           <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 800, color: 'var(--accent)', letterSpacing: showWitnessSecret ? 'normal' : '2px' }}>
-                            {showWitnessSecret ? `USD ${(witnessTarget?.numericValue || 145000).toLocaleString()}` : '██████████'}
+                            {showWitnessSecret
+                              ? typeof witnessTarget?.numericValue === 'number'
+                                ? `${enterpriseSpec.currency} ${witnessTarget.numericValue.toLocaleString()}`.trim()
+                                : '—'
+                              : '██████████'}
                           </span>
                           <button
                             type="button"
