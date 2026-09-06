@@ -47,7 +47,13 @@ import {
   Fingerprint,
   AlertTriangle,
   Binary,
+  Network,
 } from 'lucide-react';
+import {
+  VerifierPortalView,
+  HardwareEnclaveView,
+  TransportProtocolView,
+} from './layers';
 
 export interface IngestedDoc {
   fileName: string;
@@ -78,7 +84,10 @@ export interface OcrTelemetrySummary {
   targetsFound: number;
 }
 
+export type MainAppView = 'STUDIO' | 'VERIFIER' | 'ENCLAVE' | 'TRANSPORT';
+
 export function App() {
+  const [mainView, setMainView] = useState<MainAppView>('STUDIO');
   const [activePhase, setActivePhase] = useState<1 | 2 | 3 | 4 | 5>(1);
   const [doc, setDoc] = useState<IngestedDoc | null>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -478,6 +487,11 @@ export function App() {
   // Support URL parameters for automated verification & presets
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
+    const viewParam = params.get('view')?.toUpperCase();
+    if (viewParam === 'VERIFIER') setMainView('VERIFIER');
+    else if (viewParam === 'ENCLAVE') setMainView('ENCLAVE');
+    else if (viewParam === 'TRANSPORT') setMainView('TRANSPORT');
+
     if (params.get('sample') === 'true' || params.get('phase')) {
       handleLoadSample().then(() => {
         const p = params.get('phase');
@@ -616,6 +630,64 @@ export function App() {
               </span>
             </div>
 
+            {/* Modular Protocol Layer Switcher */}
+            <div className="neu-nav-track" style={{ margin: '0 8px' }}>
+              <button
+                type="button"
+                className={`neu-nav-btn ${mainView === 'STUDIO' ? 'active' : ''}`}
+                onClick={() => setMainView('STUDIO')}
+                style={{ display: 'flex', alignItems: 'center', gap: '7px' }}
+              >
+                <FileText size={14} />
+                <span>Redaction Studio</span>
+              </button>
+
+              <button
+                type="button"
+                className={`neu-nav-btn ${mainView === 'VERIFIER' ? 'active' : ''}`}
+                onClick={() => setMainView('VERIFIER')}
+                style={{ display: 'flex', alignItems: 'center', gap: '7px', position: 'relative' }}
+              >
+                <ShieldCheck size={14} />
+                <span>Enterprise Verifier</span>
+                {auditPackage && (
+                  <span
+                    style={{
+                      width: '7px',
+                      height: '7px',
+                      borderRadius: '50%',
+                      backgroundColor: 'var(--accent)',
+                      boxShadow: '0 0 6px rgba(234, 88, 12, 0.8)',
+                      display: 'inline-block',
+                    }}
+                    title="Audit Package Ready for Verification"
+                  />
+                )}
+              </button>
+
+              <button
+                type="button"
+                className={`neu-nav-btn ${mainView === 'ENCLAVE' ? 'active' : ''}`}
+                onClick={() => setMainView('ENCLAVE')}
+                style={{ display: 'flex', alignItems: 'center', gap: '7px' }}
+              >
+                <Cpu size={14} />
+                <span>Hardware Enclave</span>
+                <span style={{ fontSize: '0.65rem', padding: '1px 6px', borderRadius: '6px', backgroundColor: 'rgba(107, 114, 128, 0.15)', color: 'var(--fg-muted)', fontWeight: 700 }}>v0.3</span>
+              </button>
+
+              <button
+                type="button"
+                className={`neu-nav-btn ${mainView === 'TRANSPORT' ? 'active' : ''}`}
+                onClick={() => setMainView('TRANSPORT')}
+                style={{ display: 'flex', alignItems: 'center', gap: '7px' }}
+              >
+                <Network size={14} />
+                <span>Transport Protocol</span>
+                <span style={{ fontSize: '0.65rem', padding: '1px 6px', borderRadius: '6px', backgroundColor: 'rgba(107, 114, 128, 0.15)', color: 'var(--fg-muted)', fontWeight: 700 }}>v0.4</span>
+              </button>
+            </div>
+
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               {doc ? (
                 <button
@@ -648,8 +720,10 @@ export function App() {
             </div>
           </div>
 
-          {/* Sequential 5-Phase Progress Track */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '14px' }}>
+          {mainView === 'STUDIO' && (
+            <>
+              {/* Sequential 5-Phase Progress Track */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '14px' }}>
             {/* Phase 1 Stepper Node */}
             <div
               onClick={() => setActivePhase(1)}
@@ -2073,11 +2147,50 @@ export function App() {
                       <Download size={14} />
                       <span>Download Sanitized Redacted PDF</span>
                     </button>
+
+                    {auditPackage && (
+                      <button
+                        className="neu-btn-primary"
+                        onClick={() => setMainView('VERIFIER')}
+                        style={{
+                          width: '100%',
+                          padding: '13px',
+                          fontSize: '0.86rem',
+                          gap: '8px',
+                          marginTop: '4px',
+                          backgroundColor: 'var(--bg-surface)',
+                          color: 'var(--accent)',
+                        }}
+                      >
+                        <ShieldCheck size={16} />
+                        <span>Launch Standalone Enterprise Verifier Portal (Layer 6) →</span>
+                      </button>
+                    )}
                   </div>
                 </div>
               )}
             </div>
           </div>
+          </>
+        )}
+
+        {/* Layer 6: Standalone Enterprise Verifier Portal */}
+        {mainView === 'VERIFIER' && (
+          <VerifierPortalView
+            initialPackage={auditPackage}
+            onNavigateToStudio={() => setMainView('STUDIO')}
+          />
+        )}
+
+        {/* Layer 7: Hardware Enclave & TPM 2.0 (Scaffolded Blank Page) */}
+        {mainView === 'ENCLAVE' && (
+          <HardwareEnclaveView onBackToStudio={() => setMainView('STUDIO')} />
+        )}
+
+        {/* Layer 8: Web-to-Desktop Transport Protocol (Scaffolded Blank Page) */}
+        {mainView === 'TRANSPORT' && (
+          <TransportProtocolView onBackToStudio={() => setMainView('STUDIO')} />
+        )}
         </div>
       </main>
     </div>
